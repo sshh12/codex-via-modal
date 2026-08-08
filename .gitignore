@@ -1,0 +1,6 @@
+.venv/
+.codex-modal/
+.env
+*.log
+__pycache__/
+*.py[cod]
