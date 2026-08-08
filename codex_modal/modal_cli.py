@@ -16,6 +16,9 @@ from .paths import PROJECT_ROOT
 
 ENDPOINT_ID_PATTERN = re.compile(r"^ep-[A-Za-z0-9]{22}$")
 ENDPOINT_ID_SEARCH = re.compile(r"\b(ep-[A-Za-z0-9]{22})\b")
+APP_ID_PATTERN = re.compile(r"^ap-[A-Za-z0-9]{22}$")
+APP_ID_SEARCH = re.compile(r"\b(ap-[A-Za-z0-9]{22})\b")
+OWNED_VOLUME_PATTERN = re.compile(r"^cm-[A-Za-z0-9][A-Za-z0-9._-]{0,59}$")
 WORKSPACE_LINE = re.compile(
     r"^Workspace:\s+([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\s+\(ac-[A-Za-z0-9]+\)\s*$",
     re.MULTILINE,
@@ -172,6 +175,26 @@ def list_endpoints(environment_name: str | None = None) -> list[dict[str, Any]]:
     return [row for row in document if isinstance(row, dict)]
 
 
+def list_apps(environment_name: str | None = None) -> list[dict[str, Any]]:
+    arguments = ["app", "list", "--json"]
+    if environment_name:
+        arguments.extend(["--env", environment_name])
+    result = _completed(arguments)
+    if result.returncode != 0:
+        raise _failure("Listing Modal apps", result)
+    if not result.stdout.strip():
+        return []
+    document = _json_value(result.stdout)
+    if isinstance(document, dict):
+        for key in ("apps", "data", "items"):
+            if isinstance(document.get(key), list):
+                document = document[key]
+                break
+    if not isinstance(document, list):
+        raise RuntimeError("Modal app list returned an unexpected JSON shape.")
+    return [row for row in document if isinstance(row, dict)]
+
+
 def create_endpoint(arguments: list[str]) -> tuple[str, str | None]:
     """Run endpoint creation with live output and return (combined output, endpoint ID)."""
 
@@ -203,6 +226,68 @@ def create_endpoint(arguments: list[str]) -> tuple[str, str | None]:
     return output, match.group(1) if match else None
 
 
+def deploy_app(
+    module: str,
+    app_name: str,
+    environment_name: str | None,
+    environment: dict[str, str],
+) -> tuple[str, str | None]:
+    """Deploy a Modal app with live build output and return its exact app ID when shown."""
+
+    arguments = ["deploy", "--name", app_name, "-m", module]
+    if environment_name:
+        arguments[1:1] = ["--env", environment_name]
+    process = subprocess.Popen(
+        command(*arguments),
+        cwd=PROJECT_ROOT,
+        env=_utf8_environment(environment),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    chunks: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        chunks.append(line)
+        print(line, end="", flush=True)
+    return_code = process.wait()
+    output = "".join(chunks)
+    if return_code != 0:
+        detail = output.strip()
+        raise RuntimeError(
+            f"Modal app deployment failed with exit code {return_code}"
+            + (f": {detail}" if detail else ".")
+        )
+    match = APP_ID_SEARCH.search(output)
+    return output, match.group(1) if match else None
+
+
+def invoke_deployed_function(
+    app_name: str,
+    function_name: str,
+    environment_name: str | None,
+) -> Any:
+    """Invoke one function from a deployed app using the pinned Modal SDK."""
+
+    try:
+        import modal
+
+        function = modal.Function.from_name(
+            app_name,
+            function_name,
+            environment_name=environment_name,
+        )
+        with modal.enable_output():
+            return function.remote()
+    except Exception as error:
+        raise RuntimeError(
+            f"Invoking Modal function {app_name!r}/{function_name!r} failed: {error}"
+        ) from error
+
+
 def stop_endpoint(
     endpoint_id: str,
     environment_name: str | None = None,
@@ -225,6 +310,56 @@ def stop_endpoint(
         print(output)
     lowered = output.lower()
     return result.returncode == 0 or "already stopped" in lowered or "not found" in lowered
+
+
+def stop_app(
+    app_id: str,
+    environment_name: str | None = None,
+    *,
+    quiet: bool = False,
+) -> bool:
+    if not APP_ID_PATTERN.fullmatch(app_id):
+        raise ValueError(f"Refusing to stop invalid app ID {app_id!r}.")
+    arguments = ["app", "stop", app_id, "--yes"]
+    if environment_name:
+        arguments.extend(["--env", environment_name])
+    try:
+        result = _completed(arguments, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        if not quiet:
+            print(f"App cleanup failed: {error}", file=sys.stderr)
+        return False
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if output and not quiet:
+        print(output)
+    lowered = output.lower()
+    return result.returncode == 0 or "already stopped" in lowered or "not found" in lowered
+
+
+def delete_owned_volume(
+    volume_name: str,
+    environment_name: str | None = None,
+    *,
+    quiet: bool = False,
+) -> bool:
+    if not OWNED_VOLUME_PATTERN.fullmatch(volume_name):
+        raise ValueError(
+            f"Refusing to delete non-wrapper-owned Volume name {volume_name!r}."
+        )
+    arguments = ["volume", "delete", volume_name, "--yes", "--allow-missing"]
+    if environment_name:
+        arguments.extend(["--env", environment_name])
+    try:
+        result = _completed(arguments, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        if not quiet:
+            print(f"Volume cleanup failed: {error}", file=sys.stderr)
+        return False
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if output and not quiet:
+        print(output)
+    lowered = output.lower()
+    return result.returncode == 0 or "not found" in lowered or "does not exist" in lowered
 
 
 def scrubbed_environment() -> dict[str, str]:

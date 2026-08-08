@@ -12,16 +12,27 @@ from . import modal_cli
 from .bootstrap import ensure_dependencies
 from .codex_config import ModelSettings, prepare_run_configuration
 from .credentials import ProxyCredential, from_environment, load_proxy_token, store_proxy_token
+from .custom_deploy import (
+    CUSTOM_APP_MODULE,
+    CustomDeployment,
+    build_custom_deployment,
+    custom_app_name,
+    custom_app_base_url,
+)
 from .lifecycle import (
     EndpointRoute,
+    cleanup_owned_resource,
+    create_owned_app_state,
     create_owned_state,
     direct_endpoint_base_url,
     finish_state,
+    resolve_app_id,
     resolve_endpoint_id,
     run_process_with_heartbeat,
     start_watchdog,
     sweep_stale_endpoints,
     wait_for_attached_endpoint,
+    wait_for_direct_app,
     wait_for_endpoint,
 )
 from .options import (
@@ -53,6 +64,7 @@ Model selection:
   --modal-pick                       Pick a preset or arbitrary model interactively
   --modal-preset NAME                Select a preset
   --modal-model REPO                 Modal catalog/base Hugging Face repo ID
+  --modal-model-revision REV         Exact model/base revision for a custom app
   --modal-custom-hf-repo REPO        Fine-tuned Hugging Face weights
   --modal-custom-hf-revision REV     Revision of custom weights
   --modal-hf-token-env ENV           Read a private HF token from this environment variable
@@ -60,9 +72,22 @@ Model selection:
   --modal-reasoning-effort LEVEL     minimal|low|medium|high|xhigh|max|ultra
   --modal-reasoning-levels CSV       Levels advertised in Codex's model catalog
 
+Non-catalog custom app:
+  --modal-self-managed               Deploy the generic SGLang Modal app
+  --modal-gpu TYPE[:COUNT]           Required explicit GPU allocation, e.g. B200:2
+  --modal-base-volume NAME           Optional Volume holding reusable base weights
+  --modal-base-volume-path PATH      Base checkpoint path inside that Volume
+  --modal-sglang-image IMAGE         Override the pinned SGLang container image
+  --modal-sglang-arg ARG             Repeat --flag or --flag=value engine arguments
+  --modal-cpu CORES                  Serving CPU allocation (default: 8)
+  --modal-memory MIB                 Serving memory allocation (default: 98304)
+  --modal-scaledown-window SECONDS   Idle scale-down window (default: 300)
+  --modal-target-inputs COUNT        Target input concurrency (default: 16)
+
 Endpoint placement/lifecycle:
   --modal-endpoint-name NAME         Explicit name for a newly-created endpoint
   --modal-use-endpoint NAME_OR_HOST  Attach to an existing endpoint; never stop it
+  --modal-use-app NAME               Attach to an existing self-managed app; never stop it
   --modal-env ENV                    Modal environment
   --modal-routing-region REGION      us-west (default), us-east, ca-central, eu-west, ap-south
   --modal-compute-region REGION      Repeat to allow multiple compute regions
@@ -84,12 +109,12 @@ Setup and behavior:
 DeepSeek V4 default:
   codex-modal --modal-preset deepseek-v4-flash-0731
 
-Arbitrary compatible fine-tune:
+Catalog-compatible fine-tune:
   codex-modal --modal-model Qwen/Qwen3.6-27B \
     --modal-custom-hf-repo your-org/your-finetune
 
-The base model must be supported by Modal's endpoint catalog and must be the architecture
-for custom weights. Codex provider/model/config override flags are deliberately blocked.
+For a model outside Modal's endpoint catalog, add --modal-self-managed and an explicit
+--modal-gpu. Codex provider/model/config override flags are deliberately blocked.
 '''
 
 
@@ -217,6 +242,29 @@ def _stop_command(endpoint_id: str, environment_name: str | None) -> str:
     return shlex.join(arguments)
 
 
+def _app_stop_command(app_id: str, environment_name: str | None) -> str:
+    arguments = [sys.executable, "-m", "modal", "app", "stop", app_id, "--yes"]
+    if environment_name:
+        arguments.extend(["--env", environment_name])
+    return shlex.join(arguments)
+
+
+def _volume_delete_command(volume_name: str, environment_name: str | None) -> str:
+    arguments = [
+        sys.executable,
+        "-m",
+        "modal",
+        "volume",
+        "delete",
+        volume_name,
+        "--yes",
+        "--allow-missing",
+    ]
+    if environment_name:
+        arguments.extend(["--env", environment_name])
+    return shlex.join(arguments)
+
+
 def _require_action_only(options: WrapperOptions) -> None:
     if options.codex_arguments:
         raise ValueError(
@@ -235,17 +283,49 @@ def _run(options: WrapperOptions) -> int:
     endpoint_name, endpoint_host, shared_base_url = endpoint_target(
         options, resolved.display_model
     )
-    needs_inference = codex_needs_inference(options.codex_arguments)
-    model_slug = endpoint_host if needs_inference or options.dry_run else (
-        f"offline.{options.routing_region}.modal.invalid"
+    initial_custom_app_name = (
+        custom_app_name(endpoint_name, "workspace")
+        if options.self_managed
+        else endpoint_name
     )
+    custom_deployment: CustomDeployment | None = (
+        build_custom_deployment(options, resolved, initial_custom_app_name)
+        if options.self_managed
+        else None
+    )
+    needs_inference = codex_needs_inference(options.codex_arguments)
+    if custom_deployment is not None:
+        initial_base_url = custom_app_base_url(
+            "workspace", custom_deployment.app_name, options.routing_region
+        )
+        model_slug = (
+            resolved.display_model
+            if needs_inference or options.dry_run
+            else f"offline.{options.routing_region}.modal.invalid"
+        )
+    elif options.use_app:
+        initial_base_url = custom_app_base_url(
+            "ws", endpoint_name, options.routing_region
+        )
+        model_slug = (
+            resolved.display_model
+            if needs_inference or options.dry_run
+            else f"offline.{options.routing_region}.modal.invalid"
+        )
+    else:
+        initial_base_url = shared_base_url
+        model_slug = (
+            endpoint_host
+            if needs_inference or options.dry_run
+            else f"offline.{options.routing_region}.modal.invalid"
+        )
     settings = ModelSettings(
         slug=model_slug,
         display_model=resolved.display_model,
         context_window=resolved.context_window,
         reasoning_effort=resolved.reasoning_effort,
         reasoning_levels=resolved.reasoning_levels,
-        provider_base_url=shared_base_url,
+        provider_base_url=initial_base_url,
         persist_history=options.persist_history,
     )
 
@@ -258,16 +338,26 @@ def _run(options: WrapperOptions) -> int:
             print(f"  Base model:       {resolved.base_model}")
             if resolved.custom_hf_repo:
                 print(f"  Custom weights:   {resolved.custom_hf_repo}")
-            print(f"  Endpoint model:   {endpoint_host}")
-            print(f"  Responses URL:    {shared_base_url}")
+            if custom_deployment is not None:
+                print("  Serving mode:     self-managed SGLang Modal app")
+                print(f"  GPU allocation:   {custom_deployment.gpu}")
+                if custom_deployment.base_volume:
+                    print(f"  Reuse Volume:     {custom_deployment.base_volume}")
+                print(f"  Temporary Volume: {custom_deployment.volume_name}")
+            elif options.use_app:
+                print("  Serving mode:     existing self-managed SGLang Modal app")
+            else:
+                print("  Serving mode:     Modal managed endpoint")
+            print(f"  Endpoint model:   {model_slug}")
+            print(f"  Responses URL:    {initial_base_url}")
             print(f"  Isolated home:    {CODEX_HOME}")
-            if options.use_endpoint:
+            if options.use_endpoint or options.use_app:
                 action = "attach; never stop"
             elif options.keep_endpoint:
                 action = "create; keep"
             else:
                 action = "create; exact-ID cleanup + detached watchdog"
-            print(f"  Endpoint action:  {action}")
+            print(f"  Resource action:  {action}")
             print(
                 "  Telemetry:        analytics/feedback off; OTel log/metric/trace exporters none"
             )
@@ -297,20 +387,95 @@ def _run(options: WrapperOptions) -> int:
     credential = _credential_or_setup(options)
     configuration = None
     owned_endpoint_id: str | None = None
+    owned_app_id: str | None = None
     state_path: Path | None = None
     try:
         _ensure_modal_login(options)
         workspace_slug = modal_cli.current_workspace_slug()
-        direct_base_url = direct_endpoint_base_url(
-            workspace_slug, endpoint_name, options.routing_region
-        )
+        if custom_deployment is not None:
+            safe_app_name = custom_app_name(endpoint_name, workspace_slug)
+            if safe_app_name != endpoint_name:
+                print(
+                    f"Shortening custom app name to {safe_app_name!r} so the full "
+                    "Modal Server DNS label remains valid."
+                )
+            endpoint_name = safe_app_name
+            custom_deployment = build_custom_deployment(
+                options, resolved, endpoint_name
+            )
+        if custom_deployment is not None or options.use_app:
+            direct_base_url = custom_app_base_url(
+                workspace_slug, endpoint_name, options.routing_region
+            )
+        else:
+            direct_base_url = direct_endpoint_base_url(
+                workspace_slug, endpoint_name, options.routing_region
+            )
         route = EndpointRoute(
             model_slug=resolved.display_model,
             base_url=direct_base_url,
             source="direct-unverified",
         )
 
-        if not options.use_endpoint:
+        if custom_deployment is not None:
+            sweep_stale_endpoints(verbose=True)
+            print(
+                f"Deploying custom Modal app {endpoint_name!r} for "
+                f"{resolved.display_model} on {custom_deployment.gpu}..."
+            )
+            try:
+                _, parsed_id = modal_cli.deploy_app(
+                    CUSTOM_APP_MODULE,
+                    endpoint_name,
+                    options.environment_name,
+                    custom_deployment.deployment_environment(),
+                )
+            except RuntimeError:
+                try:
+                    owned_app_id = resolve_app_id(
+                        endpoint_name, options.environment_name
+                    )
+                except RuntimeError:
+                    pass
+                raise
+            owned_app_id = parsed_id or resolve_app_id(
+                endpoint_name, options.environment_name
+            )
+            if not options.keep_endpoint:
+                state_path = create_owned_app_state(
+                    owned_app_id,
+                    endpoint_name,
+                    custom_deployment.volume_name,
+                    options.environment_name,
+                )
+                start_watchdog(state_path)
+            print(
+                "Preparing custom weights on CPU before allocating the serving GPU(s)..."
+            )
+            manifest = modal_cli.invoke_deployed_function(
+                endpoint_name, "prepare_model", options.environment_name
+            )
+            if isinstance(manifest, dict):
+                print(
+                    "Model preparation complete: "
+                    f"downloaded {manifest.get('downloaded_files', '?')} file(s); "
+                    f"reused {manifest.get('reused_files', '?')} base file(s)."
+                )
+            if options.wait_for_endpoint:
+                route = wait_for_direct_app(
+                    direct_base_url=direct_base_url,
+                    preferred_model=resolved.display_model,
+                    proxy_token=credential.combined,
+                    timeout_seconds=options.startup_timeout,
+                    state_path=state_path,
+                )
+            else:
+                print(
+                    "WARNING: readiness waiting is disabled; Codex may fail until the route is live.",
+                    file=sys.stderr,
+                )
+
+        elif not (options.use_endpoint or options.use_app):
             sweep_stale_endpoints(verbose=True)
             print(
                 f"Creating Modal endpoint {endpoint_name!r} for {resolved.display_model}..."
@@ -345,14 +510,23 @@ def _run(options: WrapperOptions) -> int:
                 )
 
         elif options.wait_for_endpoint:
-            route = wait_for_attached_endpoint(
-                endpoint_host=endpoint_host,
-                shared_base_url=shared_base_url,
-                direct_base_url=direct_base_url,
-                preferred_model=resolved.display_model,
-                proxy_token=credential.combined,
-                timeout_seconds=options.startup_timeout,
-            )
+            if options.use_app:
+                route = wait_for_direct_app(
+                    direct_base_url=direct_base_url,
+                    preferred_model=resolved.display_model,
+                    proxy_token=credential.combined,
+                    timeout_seconds=options.startup_timeout,
+                    state_path=None,
+                )
+            else:
+                route = wait_for_attached_endpoint(
+                    endpoint_host=endpoint_host,
+                    shared_base_url=shared_base_url,
+                    direct_base_url=direct_base_url,
+                    preferred_model=resolved.display_model,
+                    proxy_token=credential.combined,
+                    timeout_seconds=options.startup_timeout,
+                )
         else:
             print(
                 "WARNING: readiness waiting is disabled; Codex may fail until the route is live.",
@@ -400,6 +574,55 @@ def _run(options: WrapperOptions) -> int:
             state_path=state_path,
         )
     finally:
+        if owned_app_id and custom_deployment is not None:
+            if options.keep_endpoint:
+                print(
+                    "WARNING: keeping custom app and model Volume by request. Stop/delete "
+                    "them later with:\n  "
+                    + _app_stop_command(owned_app_id, options.environment_name)
+                    + "\n  "
+                    + _volume_delete_command(
+                        custom_deployment.volume_name, options.environment_name
+                    ),
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Stopping wrapper-owned Modal app {owned_app_id} and deleting "
+                    f"temporary Volume {custom_deployment.volume_name!r}..."
+                )
+                cleaned = cleanup_owned_resource(
+                    {
+                        "resource_kind": "app",
+                        "app_id": owned_app_id,
+                        "volume_name": custom_deployment.volume_name,
+                        "environment": options.environment_name,
+                    }
+                )
+                if cleaned and state_path is not None:
+                    finish_state(state_path)
+                elif not cleaned:
+                    if state_path is not None:
+                        detail = " The detached watchdog will retry after this wrapper exits."
+                    else:
+                        detail = " No watchdog was registered before the failure."
+                    print(
+                        "WARNING: immediate custom-app cleanup failed." + detail,
+                        file=sys.stderr,
+                    )
+                    print(
+                        "Manual fallback:\n  "
+                        + _app_stop_command(owned_app_id, options.environment_name)
+                        + "\n  "
+                        + _volume_delete_command(
+                            custom_deployment.volume_name, options.environment_name
+                        ),
+                        file=sys.stderr,
+                    )
+        elif custom_deployment is not None and not options.keep_endpoint:
+            modal_cli.delete_owned_volume(
+                custom_deployment.volume_name, options.environment_name
+            )
         if owned_endpoint_id:
             if options.keep_endpoint:
                 print(

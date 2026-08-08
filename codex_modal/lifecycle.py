@@ -51,11 +51,28 @@ def _atomic_json(path: Path, document: dict[str, Any]) -> None:
 def _read_state(path: Path) -> dict[str, Any]:
     document = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
-        raise ValueError("endpoint state is not a JSON object")
-    endpoint_id = str(document.get("endpoint_id", ""))
-    if not modal_cli.ENDPOINT_ID_PATTERN.fullmatch(endpoint_id):
-        raise ValueError("endpoint state contains an invalid endpoint ID")
+        raise ValueError("ownership state is not a JSON object")
+    resource_kind = str(document.get("resource_kind", "endpoint"))
+    if resource_kind == "endpoint":
+        endpoint_id = str(document.get("endpoint_id", ""))
+        if not modal_cli.ENDPOINT_ID_PATTERN.fullmatch(endpoint_id):
+            raise ValueError("endpoint state contains an invalid endpoint ID")
+    elif resource_kind == "app":
+        app_id = str(document.get("app_id", ""))
+        volume_name = str(document.get("volume_name", ""))
+        if not modal_cli.APP_ID_PATTERN.fullmatch(app_id):
+            raise ValueError("app state contains an invalid app ID")
+        if not modal_cli.OWNED_VOLUME_PATTERN.fullmatch(volume_name):
+            raise ValueError("app state contains an invalid owned Volume name")
+    else:
+        raise ValueError(f"ownership state contains unknown resource kind {resource_kind!r}")
     return document
+
+
+def _state_resource_id(state: dict[str, Any]) -> str:
+    if str(state.get("resource_kind", "endpoint")) == "app":
+        return str(state["app_id"])
+    return str(state["endpoint_id"])
 
 
 def _filetime_value(value: Any) -> int:
@@ -163,8 +180,39 @@ def create_owned_state(
     cancel_path = RUNTIME_ROOT / f"cancel-{endpoint_id}-{secrets.token_hex(5)}"
     now = _utc_now()
     state = {
+        "resource_kind": "endpoint",
         "endpoint_id": endpoint_id,
         "endpoint_name": endpoint_name,
+        "environment": environment_name,
+        "owner_pid": os.getpid(),
+        "owner_identity": process_identity(os.getpid()),
+        "created_at_utc": now,
+        "heartbeat_utc": now,
+        "cancel_path": str(cancel_path),
+    }
+    _atomic_json(state_path, state)
+    return state_path
+
+
+def create_owned_app_state(
+    app_id: str,
+    app_name: str,
+    volume_name: str,
+    environment_name: str | None,
+) -> Path:
+    if not modal_cli.APP_ID_PATTERN.fullmatch(app_id):
+        raise ValueError(f"Invalid app ID {app_id!r}.")
+    if not modal_cli.OWNED_VOLUME_PATTERN.fullmatch(volume_name):
+        raise ValueError(f"Invalid wrapper-owned Volume name {volume_name!r}.")
+    ensure_state_dirs()
+    state_path = RUNTIME_ROOT / f"owned-{app_id}.json"
+    cancel_path = RUNTIME_ROOT / f"cancel-{app_id}-{secrets.token_hex(5)}"
+    now = _utc_now()
+    state = {
+        "resource_kind": "app",
+        "app_id": app_id,
+        "app_name": app_name,
+        "volume_name": volume_name,
         "environment": environment_name,
         "owner_pid": os.getpid(),
         "owner_identity": process_identity(os.getpid()),
@@ -218,28 +266,44 @@ def start_watchdog(state_path: Path) -> None:
     subprocess.Popen(arguments, **options)
 
 
-def _log_cleanup(endpoint_id: str, message: str) -> None:
+def _log_cleanup(resource_id: str, message: str) -> None:
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    path = RUNTIME_ROOT / f"cleanup-{endpoint_id}.log"
+    path = RUNTIME_ROOT / f"cleanup-{resource_id}.log"
     with path.open("a", encoding="utf-8") as stream:
         stream.write(f"{_utc_now()} {message}\n")
 
 
+def cleanup_owned_resource(state: dict[str, Any], *, quiet: bool = False) -> bool:
+    environment_name = state.get("environment") or None
+    if str(state.get("resource_kind", "endpoint")) == "app":
+        app_stopped = modal_cli.stop_app(
+            str(state["app_id"]), environment_name, quiet=quiet
+        )
+        if not app_stopped:
+            return False
+        return modal_cli.delete_owned_volume(
+            str(state["volume_name"]), environment_name, quiet=quiet
+        )
+    return modal_cli.stop_endpoint(
+        str(state["endpoint_id"]), environment_name, quiet=quiet
+    )
+
+
 def watchdog_main(state_path: Path) -> int:
-    """Hidden detached subcommand: stop one exact endpoint after its owner disappears."""
+    """Stop one exact owned resource after its local wrapper disappears."""
 
     try:
         initial = _read_state(state_path)
     except (OSError, ValueError, json.JSONDecodeError):
         return 0
-    endpoint_id = str(initial["endpoint_id"])
+    resource_id = _state_resource_id(initial)
     while True:
         try:
             state = _read_state(state_path)
         except FileNotFoundError:
             return 0
         except (OSError, ValueError, json.JSONDecodeError) as error:
-            _log_cleanup(endpoint_id, f"invalid state; refusing cleanup: {error}")
+            _log_cleanup(resource_id, f"invalid state; refusing cleanup: {error}")
             return 1
         cancel_path = Path(str(state.get("cancel_path", "")))
         if str(cancel_path) and cancel_path.exists():
@@ -248,21 +312,20 @@ def watchdog_main(state_path: Path) -> int:
             break
         time.sleep(3)
 
-    environment_name = state.get("environment") or None
-    _log_cleanup(endpoint_id, "owner exited; starting endpoint cleanup")
+    _log_cleanup(resource_id, "owner exited; starting resource cleanup")
     for attempt in range(1, 13):
-        if modal_cli.stop_endpoint(endpoint_id, environment_name, quiet=True):
-            _log_cleanup(endpoint_id, f"endpoint stopped on attempt {attempt}")
+        if cleanup_owned_resource(state, quiet=True):
+            _log_cleanup(resource_id, f"resource cleaned on attempt {attempt}")
             finish_state(state_path)
             return 0
-        _log_cleanup(endpoint_id, f"cleanup attempt {attempt} failed")
+        _log_cleanup(resource_id, f"cleanup attempt {attempt} failed")
         time.sleep(min(30, 2 * attempt))
-    _log_cleanup(endpoint_id, "cleanup retries exhausted; state retained for next sweep")
+    _log_cleanup(resource_id, "cleanup retries exhausted; state retained for next sweep")
     return 1
 
 
 def sweep_stale_endpoints(*, verbose: bool = True) -> tuple[int, int]:
-    """Stop endpoints whose exact ownership records no longer have a live owner."""
+    """Clean owned endpoints/apps whose exact records no longer have a live owner."""
 
     ensure_state_dirs()
     stopped = 0
@@ -277,15 +340,15 @@ def sweep_stale_endpoints(*, verbose: bool = True) -> tuple[int, int]:
                     file=sys.stderr,
                 )
             continue
-        endpoint_id = str(state["endpoint_id"])
+        resource_id = _state_resource_id(state)
         if owner_is_alive(state):
             active += 1
             if verbose:
-                print(f"Leaving active wrapper-owned endpoint {endpoint_id} alone.")
+                print(f"Leaving active wrapper-owned resource {resource_id} alone.")
             continue
         if verbose:
-            print(f"Recovering stale wrapper-owned endpoint {endpoint_id}...")
-        if modal_cli.stop_endpoint(endpoint_id, state.get("environment") or None):
+            print(f"Recovering stale wrapper-owned resource {resource_id}...")
+        if cleanup_owned_resource(state):
             finish_state(state_path)
             stopped += 1
         elif verbose:
@@ -315,6 +378,48 @@ def resolve_endpoint_id(endpoint_name: str, environment_name: str | None) -> str
     raise RuntimeError(
         f"Endpoint {endpoint_name!r} was created, but its exact ID could not be resolved; "
         "codex-modal will not guess at a cleanup target. Stop that named endpoint from the "
+        f"Modal dashboard or CLI.{suffix}"
+    )
+
+
+def resolve_app_id(app_name: str, environment_name: str | None) -> str:
+    """Resolve a unique generated deployment name to an exact Modal app ID."""
+
+    last_error: Exception | None = None
+    for _ in range(10):
+        try:
+            matches = [
+                row
+                for row in modal_cli.list_apps(environment_name)
+                if str(row.get("description") or row.get("name") or "") == app_name
+            ]
+            active_ids = [
+                str(row.get("app_id") or row.get("id") or "")
+                for row in matches
+                if str(row.get("state", "")).lower()
+                not in {"stopped", "failed", "completed"}
+            ]
+            active_ids = [
+                candidate
+                for candidate in active_ids
+                if modal_cli.APP_ID_PATTERN.fullmatch(candidate)
+            ]
+            if len(active_ids) == 1:
+                return active_ids[0]
+            if len(active_ids) > 1:
+                raise RuntimeError(
+                    f"Multiple active Modal apps are named {app_name!r}; refusing to "
+                    "guess which exact app ID the wrapper owns."
+                )
+        except Exception as error:  # deployment can briefly race app-list visibility
+            last_error = error
+            if "Multiple active Modal apps" in str(error):
+                break
+        time.sleep(2)
+    suffix = f" Last list error: {last_error}" if last_error else ""
+    raise RuntimeError(
+        f"App {app_name!r} was deployed, but its exact ID could not be resolved; "
+        "codex-modal will not guess at a cleanup target. Stop that named app from the "
         f"Modal dashboard or CLI.{suffix}"
     )
 
@@ -410,6 +515,27 @@ def wait_for_attached_endpoint(
     )
 
 
+def wait_for_direct_app(
+    *,
+    direct_base_url: str,
+    preferred_model: str,
+    proxy_token: str,
+    timeout_seconds: int,
+    state_path: Path | None,
+) -> EndpointRoute:
+    print(f"Waiting for custom Modal Responses route: {direct_base_url}")
+    return _wait_for_available_route(
+        endpoint_host="",
+        shared_base_url="",
+        direct_base_url=direct_base_url,
+        preferred_model=preferred_model,
+        proxy_token=proxy_token,
+        deadline=time.monotonic() + timeout_seconds,
+        state_path=state_path,
+        check_shared=False,
+    )
+
+
 def _authenticated_json(url: str, proxy_token: str) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
@@ -441,8 +567,11 @@ def _wait_for_available_route(
     proxy_token: str,
     deadline: float,
     state_path: Path | None,
+    check_shared: bool = True,
 ) -> EndpointRoute:
-    shared_models_url = f"{shared_base_url.rstrip('/')}/models"
+    shared_models_url = (
+        f"{shared_base_url.rstrip('/')}/models" if check_shared else None
+    )
     direct_models_url = f"{direct_base_url.rstrip('/')}/models"
     direct_openapi_url = (
         f"{direct_base_url.rstrip('/').removesuffix('/v1')}/openapi.json"
@@ -451,21 +580,22 @@ def _wait_for_available_route(
 
     while time.monotonic() < deadline:
         heartbeat(state_path)
-        try:
-            shared_ids = _document_model_ids(
-                _authenticated_json(shared_models_url, proxy_token)
-            )
-            if endpoint_host in shared_ids:
-                print(f"Modal shared Responses route is ready: {endpoint_host}")
-                return EndpointRoute(endpoint_host, shared_base_url, "shared")
-        except urllib.error.HTTPError as error:
-            if error.code in (401, 403):
-                raise RuntimeError(
-                    f"Modal shared endpoint authentication failed (HTTP {error.code}). "
-                    "Check the proxy token and its RBAC environment association."
-                ) from error
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
+        if shared_models_url is not None:
+            try:
+                shared_ids = _document_model_ids(
+                    _authenticated_json(shared_models_url, proxy_token)
+                )
+                if endpoint_host in shared_ids:
+                    print(f"Modal shared Responses route is ready: {endpoint_host}")
+                    return EndpointRoute(endpoint_host, shared_base_url, "shared")
+            except urllib.error.HTTPError as error:
+                if error.code in (401, 403):
+                    raise RuntimeError(
+                        f"Modal shared endpoint authentication failed (HTTP {error.code}). "
+                        "Check the proxy token and its RBAC environment association."
+                    ) from error
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
 
         direct_model: str | None = None
         try:

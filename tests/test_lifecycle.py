@@ -122,6 +122,56 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(lifecycle.watchdog_main(state_path), 0)
             stop.assert_not_called()
 
+    def test_watchdog_cleans_exact_app_and_owned_volume(self) -> None:
+        app_id = "ap-" + "B" * 22
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / f"owned-{app_id}.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "resource_kind": "app",
+                        "app_id": app_id,
+                        "app_name": "test-app",
+                        "volume_name": "cm-test-app",
+                        "environment": "test",
+                        "owner_pid": os.getpid(),
+                        "owner_identity": "not-the-current-process",
+                        "cancel_path": str(root / "cancel"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(lifecycle, "RUNTIME_ROOT", root),
+                patch.object(lifecycle.modal_cli, "stop_app", return_value=True) as stop,
+                patch.object(
+                    lifecycle.modal_cli, "delete_owned_volume", return_value=True
+                ) as delete,
+            ):
+                self.assertEqual(lifecycle.watchdog_main(state_path), 0)
+            stop.assert_called_once_with(app_id, "test", quiet=True)
+            delete.assert_called_once_with("cm-test-app", "test", quiet=True)
+            self.assertFalse(state_path.exists())
+
+    def test_app_id_resolution_ignores_stopped_same_name(self) -> None:
+        active_id = "ap-" + "C" * 22
+        stopped_id = "ap-" + "D" * 22
+        rows = [
+            {
+                "app_id": stopped_id,
+                "description": "same-name",
+                "state": "stopped",
+            },
+            {
+                "app_id": active_id,
+                "description": "same-name",
+                "state": "deployed",
+            },
+        ]
+        with patch.object(lifecycle.modal_cli, "list_apps", return_value=rows):
+            self.assertEqual(lifecycle.resolve_app_id("same-name", None), active_id)
+
 
 if __name__ == "__main__":
     unittest.main()

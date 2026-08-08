@@ -54,6 +54,32 @@ class OptionTests(unittest.TestCase):
         self.assertEqual(parse_arguments(["setup", "--modal-env", "prod"]).action, "setup")
         self.assertEqual(parse_arguments(["cleanup"]).action, "cleanup")
 
+    def test_existing_custom_app_is_an_attach_only_target(self) -> None:
+        options = parse_arguments(
+            [
+                "--modal-use-app",
+                "codex-custom-model-1234abcd",
+                "--modal-model",
+                "org/custom-model",
+            ]
+        )
+        self.assertEqual(options.use_app, "codex-custom-model-1234abcd")
+        self.assertFalse(options.self_managed)
+        name, _, _ = endpoint_target(options, "org/custom-model")
+        self.assertEqual(name, "codex-custom-model-1234abcd")
+
+    def test_custom_app_attachment_cannot_redeploy(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_arguments(
+                [
+                    "--modal-use-app",
+                    "codex-custom-model-1234abcd",
+                    "--modal-self-managed",
+                    "--modal-gpu",
+                    "B200:2",
+                ]
+            )
+
     def test_model_provider_escape_flags_are_blocked(self) -> None:
         blocked = [
             ["--model", "gpt-5.5"],
@@ -94,6 +120,20 @@ class OptionTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             parse_arguments(["--modal-custom-hf-revision", "main"])
+        with self.assertRaises(ValueError):
+            parse_arguments(["--modal-self-managed", "--modal-model", "org/model"])
+        with self.assertRaises(ValueError):
+            parse_arguments(["--modal-gpu", "H100"])
+        with self.assertRaises(ValueError):
+            parse_arguments(
+                [
+                    "--modal-self-managed",
+                    "--modal-gpu",
+                    "H100",
+                    "--modal-base-volume",
+                    "cache",
+                ]
+            )
 
 
 if __name__ == "__main__":

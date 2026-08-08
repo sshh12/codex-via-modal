@@ -24,11 +24,23 @@ class WrapperOptions:
     action: str = "run"
     preset: str | None = None
     model: str | None = None
+    model_revision: str | None = None
     custom_hf_repo: str | None = None
     custom_hf_revision: str | None = None
     hf_token_env: str | None = None
+    self_managed: bool = False
+    base_volume: str | None = None
+    base_volume_path: str | None = None
+    gpu: str | None = None
+    sglang_image: str | None = None
+    sglang_args: list[str] = field(default_factory=list)
+    cpu: int | None = None
+    memory: int | None = None
+    scaledown_window: int | None = None
+    target_inputs: int | None = None
     endpoint_name: str | None = None
     use_endpoint: str | None = None
+    use_app: str | None = None
     environment_name: str | None = None
     routing_region: str = "us-west"
     compute_regions: list[str] = field(default_factory=list)
@@ -60,11 +72,21 @@ class ResolvedModel:
 VALUE_OPTIONS = {
     "--modal-preset": "preset",
     "--modal-model": "model",
+    "--modal-model-revision": "model_revision",
     "--modal-custom-hf-repo": "custom_hf_repo",
     "--modal-custom-hf-revision": "custom_hf_revision",
     "--modal-hf-token-env": "hf_token_env",
+    "--modal-base-volume": "base_volume",
+    "--modal-base-volume-path": "base_volume_path",
+    "--modal-gpu": "gpu",
+    "--modal-sglang-image": "sglang_image",
+    "--modal-cpu": "cpu",
+    "--modal-memory": "memory",
+    "--modal-scaledown-window": "scaledown_window",
+    "--modal-target-inputs": "target_inputs",
     "--modal-endpoint-name": "endpoint_name",
     "--modal-use-endpoint": "use_endpoint",
+    "--modal-use-app": "use_app",
     "--modal-env": "environment_name",
     "--modal-routing-region": "routing_region",
     "--modal-context-window": "context_window",
@@ -92,15 +114,27 @@ def parse_arguments(arguments: list[str]) -> WrapperOptions:
             options.codex_arguments.append("--")
             options.codex_arguments.extend(arguments[index + 1 :])
             break
-        if argument in VALUE_OPTIONS or argument == "--modal-compute-region":
+        if argument in VALUE_OPTIONS or argument in {
+            "--modal-compute-region",
+            "--modal-sglang-arg",
+        }:
             if index + 1 >= len(arguments):
                 raise ValueError(f"{argument} requires a value.")
             value = arguments[index + 1]
             if argument == "--modal-compute-region":
                 options.compute_regions.append(value)
+            elif argument == "--modal-sglang-arg":
+                options.sglang_args.append(value)
             else:
                 attribute = VALUE_OPTIONS[argument]
-                if attribute in {"context_window", "startup_timeout"}:
+                if attribute in {
+                    "context_window",
+                    "startup_timeout",
+                    "cpu",
+                    "memory",
+                    "scaledown_window",
+                    "target_inputs",
+                }:
                     try:
                         value = int(value)
                     except ValueError as error:
@@ -120,6 +154,8 @@ def parse_arguments(arguments: list[str]) -> WrapperOptions:
             _set_action(options, flags[argument])
         elif argument == "--modal-pick":
             options.pick = True
+        elif argument == "--modal-self-managed":
+            options.self_managed = True
         elif argument == "--modal-colocate-compute":
             options.colocate_compute = True
         elif argument == "--modal-no-wait":
@@ -146,6 +182,8 @@ def validate_wrapper_options(options: WrapperOptions) -> None:
         raise ValueError("--modal-context-window must be at least 8192.")
     if options.startup_timeout < 30:
         raise ValueError("--modal-startup-timeout must be at least 30 seconds.")
+    if options.startup_timeout > 86_400:
+        raise ValueError("--modal-startup-timeout cannot exceed 86400 seconds.")
     if options.routing_region not in ROUTING_REGIONS:
         raise ValueError(f"Unsupported Modal routing region {options.routing_region!r}.")
     for region in options.compute_regions:
@@ -158,11 +196,69 @@ def validate_wrapper_options(options: WrapperOptions) -> None:
     if options.custom_hf_revision and not options.custom_hf_repo:
         raise ValueError("--modal-custom-hf-revision requires --modal-custom-hf-repo.")
     if options.hf_token_env and not options.custom_hf_repo:
-        raise ValueError("--modal-hf-token-env requires --modal-custom-hf-repo.")
-    if options.use_endpoint and options.endpoint_name:
-        raise ValueError("--modal-use-endpoint and --modal-endpoint-name are mutually exclusive.")
+        if not options.self_managed:
+            raise ValueError("--modal-hf-token-env requires --modal-custom-hf-repo.")
+    attachment_options = [
+        value
+        for value in (options.use_endpoint, options.use_app, options.endpoint_name)
+        if value
+    ]
+    if len(attachment_options) > 1:
+        raise ValueError(
+            "--modal-use-endpoint, --modal-use-app, and --modal-endpoint-name "
+            "are mutually exclusive."
+        )
+    if options.use_app:
+        assert_endpoint_name(options.use_app)
     if options.endpoint_name:
         assert_endpoint_name(options.endpoint_name)
+    custom_app_values = {
+        "--modal-model-revision": options.model_revision,
+        "--modal-base-volume": options.base_volume,
+        "--modal-base-volume-path": options.base_volume_path,
+        "--modal-gpu": options.gpu,
+        "--modal-sglang-image": options.sglang_image,
+        "--modal-sglang-arg": options.sglang_args,
+        "--modal-cpu": options.cpu,
+        "--modal-memory": options.memory,
+        "--modal-scaledown-window": options.scaledown_window,
+        "--modal-target-inputs": options.target_inputs,
+    }
+    if not options.self_managed:
+        selected = next((name for name, value in custom_app_values.items() if value), None)
+        if selected:
+            raise ValueError(f"{selected} requires --modal-self-managed.")
+        return
+
+    if options.use_endpoint or options.use_app:
+        raise ValueError(
+            "--modal-self-managed cannot be combined with an attach option; omit "
+            "--modal-self-managed when attaching to an existing resource."
+        )
+    if not options.gpu:
+        raise ValueError("--modal-self-managed requires an explicit --modal-gpu.")
+    if bool(options.base_volume) != bool(options.base_volume_path):
+        raise ValueError(
+            "--modal-base-volume and --modal-base-volume-path must be provided together."
+        )
+    if options.base_volume and not options.model_revision:
+        raise ValueError(
+            "--modal-base-volume requires --modal-model-revision so shard reuse is "
+            "validated against an exact base revision."
+        )
+    if options.model_revision and options.custom_hf_repo and not options.base_volume:
+        raise ValueError(
+            "--modal-model-revision is only used for the served repo or for validating "
+            "--modal-base-volume reuse."
+        )
+    if options.cpu is not None and options.cpu < 1:
+        raise ValueError("--modal-cpu must be at least 1.")
+    if options.memory is not None and options.memory < 1024:
+        raise ValueError("--modal-memory must be at least 1024 MiB.")
+    if options.scaledown_window is not None and options.scaledown_window < 0:
+        raise ValueError("--modal-scaledown-window cannot be negative.")
+    if options.target_inputs is not None and options.target_inputs < 1:
+        raise ValueError("--modal-target-inputs must be at least 1.")
 
 
 def load_presets() -> dict[str, Any]:
@@ -256,7 +352,9 @@ def endpoint_target(options: WrapperOptions, display_model: str) -> tuple[str, s
     """Return endpoint name, hostname/model slug, and shared Responses base URL."""
 
     region = options.routing_region
-    if options.use_endpoint:
+    if options.use_app:
+        name = options.use_app
+    elif options.use_endpoint:
         host_match = ENDPOINT_HOST.fullmatch(options.use_endpoint)
         if host_match:
             name, region = host_match.groups()

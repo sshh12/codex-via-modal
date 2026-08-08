@@ -30,6 +30,8 @@ class CodexConfigurationTests(unittest.TestCase):
         injected = {
             "OPENAI_API_KEY": "must-not-survive",
             "CODEX_API_KEY": "must-not-survive",
+            "CODEX_PERMISSION_PROFILE": ":ambient-managed-profile",
+            "CODEX_THREAD_ID": "ambient-thread-id",
             "OPENAI_BASE_URL": "https://example.invalid",
             "MODAL_TOKEN_SECRET": "must-not-survive",
         }
