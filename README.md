@@ -10,19 +10,22 @@ cleaned up on exit.
 Requires Python 3.10+, `codex-cli 0.146.1`, the `codex` executable on `PATH`, and a
 Modal account. The launcher creates `.venv` and installs the pinned dependencies.
 
-```powershell
-# PowerShell
-.\codex-modal.ps1 setup
-.\codex-modal.ps1 --modal-dry-run
-.\codex-modal.ps1
-```
-
 ```sh
 # macOS/Linux
 ./codex-modal.sh setup
 ./codex-modal.sh --modal-dry-run
 ./codex-modal.sh
 ```
+
+```powershell
+# Windows PowerShell
+.\codex-modal.ps1 setup
+.\codex-modal.ps1 --modal-dry-run
+.\codex-modal.ps1
+```
+
+The remaining examples use the POSIX launcher. On Windows, substitute
+`.\codex-modal.ps1` for `./codex-modal.sh`; every option is the same.
 
 `setup` logs into Modal if needed and creates a proxy token. Credentials come from
 `MODAL_PROXY_TOKEN` (or separate ID/secret variables), the OS keyring, or an
@@ -33,19 +36,19 @@ owner-only, git-ignored local fallback. For an RBAC environment, use
 
 The default preset is `deepseek-ai/DeepSeek-V4-Flash-0731`.
 
-```powershell
-.\codex-modal.ps1 --modal-list
-.\codex-modal.ps1 --modal-pick
-.\codex-modal.ps1 --modal-model Qwen/Qwen3.6-27B
+```sh
+./codex-modal.sh --modal-list
+./codex-modal.sh --modal-pick
+./codex-modal.sh --modal-model Qwen/Qwen3.6-27B
 ```
 
 For a catalog-compatible fine-tune, give Modal the supported base architecture and
 the custom checkpoint:
 
-```powershell
-.\codex-modal.ps1 `
-  --modal-model Qwen/Qwen3.6-27B `
-  --modal-custom-hf-repo your-org/your-finetune `
+```sh
+./codex-modal.sh \
+  --modal-model Qwen/Qwen3.6-27B \
+  --modal-custom-hf-repo your-org/your-finetune \
   --modal-custom-hf-revision <exact-commit>
 ```
 
@@ -54,13 +57,13 @@ required because it cannot be inferred safely for arbitrary weights. Start with 
 model card's known-good SGLang command and repeat `--modal-sglang-arg` for its engine
 flags.
 
-```powershell
-.\codex-modal.ps1 `
-  --modal-self-managed `
-  --modal-model your-org/your-model `
-  --modal-model-revision <exact-commit> `
-  --modal-gpu B200:2 `
-  --modal-sglang-arg '--trust-remote-code' `
+```sh
+./codex-modal.sh \
+  --modal-self-managed \
+  --modal-model your-org/your-model \
+  --modal-model-revision <exact-commit> \
+  --modal-gpu B200:2 \
+  --modal-sglang-arg '--trust-remote-code' \
   --modal-startup-timeout 7200
 ```
 
@@ -75,8 +78,8 @@ GPU memory must still match the checkpoint.
 Self-managed apps default to zero warm containers, at most one serving container, and
 GPU scale-to-zero after 300 idle seconds. Set 15 minutes with:
 
-```powershell
-.\codex-modal.ps1 --modal-self-managed <other-options> --modal-scaledown-window 900
+```sh
+./codex-modal.sh --modal-self-managed <other-options> --modal-scaledown-window 900
 ```
 
 Normally, the wrapper stops only the exact endpoint/app it created and deletes only
@@ -86,9 +89,9 @@ scale-to-zero still applies.
 
 Attach without taking ownership or changing the deployed scale-down policy:
 
-```powershell
-.\codex-modal.ps1 --modal-use-endpoint <endpoint-name-or-host>
-.\codex-modal.ps1 --modal-use-app <app-name> --modal-model your-org/your-model
+```sh
+./codex-modal.sh --modal-use-endpoint <endpoint-name-or-host>
+./codex-modal.sh --modal-use-app <app-name> --modal-model your-org/your-model
 ```
 
 Useful operator hooks:
@@ -116,9 +119,9 @@ commands still work.
 
 The test suite and dry run do not create paid Modal resources:
 
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\codex-modal.ps1 --modal-dry-run
+```sh
+python -m unittest discover -s tests -v
+./codex-modal.sh --modal-dry-run
 ```
 
 See [Modal Endpoints](https://modal.com/docs/guide/endpoints),
