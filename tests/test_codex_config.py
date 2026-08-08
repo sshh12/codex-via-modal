@@ -24,7 +24,7 @@ class CodexConfigurationTests(unittest.TestCase):
             context_window=262_144,
             reasoning_effort="high",
             reasoning_levels=("low", "high"),
-            shared_base_url="https://inference.us-west.modal.direct/v1",
+            provider_base_url="https://inference.us-west.modal.direct/v1",
             persist_history=False,
         )
         injected = {
@@ -69,7 +69,7 @@ class CodexConfigurationTests(unittest.TestCase):
             context_window=131_072,
             reasoning_effort="high",
             reasoning_levels=("low", "high"),
-            shared_base_url="https://inference.us-west.modal.direct/v1",
+            provider_base_url="https://inference.us-west.modal.direct/v1",
             persist_history=True,
         )
         values = dict(guard_overrides(settings, PROJECT_ROOT / "catalog.json"))

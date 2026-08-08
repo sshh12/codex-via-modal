@@ -13,7 +13,9 @@ from .bootstrap import ensure_dependencies
 from .codex_config import ModelSettings, prepare_run_configuration
 from .credentials import ProxyCredential, from_environment, load_proxy_token, store_proxy_token
 from .lifecycle import (
+    EndpointRoute,
     create_owned_state,
+    direct_endpoint_base_url,
     finish_state,
     resolve_endpoint_id,
     run_process_with_heartbeat,
@@ -89,6 +91,22 @@ Arbitrary compatible fine-tune:
 The base model must be supported by Modal's endpoint catalog and must be the architecture
 for custom weights. Codex provider/model/config override flags are deliberately blocked.
 '''
+
+
+DIRECT_RESPONSES_REASONING = {"minimal", "low", "medium", "high"}
+
+
+def _direct_reasoning_settings(
+    effort: str, levels: tuple[str, ...]
+) -> tuple[str, tuple[str, ...]]:
+    direct_levels = tuple(
+        level for level in levels if level in DIRECT_RESPONSES_REASONING
+    )
+    if effort not in DIRECT_RESPONSES_REASONING:
+        effort = "high"
+    if effort not in direct_levels:
+        direct_levels = (*direct_levels, effort)
+    return effort, direct_levels
 
 
 def _print_presets(document: dict[str, object]) -> None:
@@ -227,7 +245,7 @@ def _run(options: WrapperOptions) -> int:
         context_window=resolved.context_window,
         reasoning_effort=resolved.reasoning_effort,
         reasoning_levels=resolved.reasoning_levels,
-        shared_base_url=shared_base_url,
+        provider_base_url=shared_base_url,
         persist_history=options.persist_history,
     )
 
@@ -277,20 +295,22 @@ def _run(options: WrapperOptions) -> int:
             configuration.clean_up()
 
     credential = _credential_or_setup(options)
-    configuration = prepare_run_configuration(
-        settings,
-        workspace=workspace,
-        proxy_token=credential.combined,
-        validate_strict=True,
-    )
-    if options.hf_token_env:
-        configuration.environment.pop(options.hf_token_env, None)
-
+    configuration = None
     owned_endpoint_id: str | None = None
     state_path: Path | None = None
     try:
+        _ensure_modal_login(options)
+        workspace_slug = modal_cli.current_workspace_slug()
+        direct_base_url = direct_endpoint_base_url(
+            workspace_slug, endpoint_name, options.routing_region
+        )
+        route = EndpointRoute(
+            model_slug=resolved.display_model,
+            base_url=direct_base_url,
+            source="direct-unverified",
+        )
+
         if not options.use_endpoint:
-            _ensure_modal_login(options)
             sweep_stale_endpoints(verbose=True)
             print(
                 f"Creating Modal endpoint {endpoint_name!r} for {resolved.display_model}..."
@@ -307,11 +327,13 @@ def _run(options: WrapperOptions) -> int:
                 )
                 start_watchdog(state_path)
             if options.wait_for_endpoint:
-                wait_for_endpoint(
+                route = wait_for_endpoint(
                     endpoint_id=owned_endpoint_id,
                     endpoint_host=endpoint_host,
                     environment_name=options.environment_name,
                     shared_base_url=shared_base_url,
+                    direct_base_url=direct_base_url,
+                    preferred_model=resolved.display_model,
                     proxy_token=credential.combined,
                     timeout_seconds=options.startup_timeout,
                     state_path=state_path,
@@ -323,15 +345,53 @@ def _run(options: WrapperOptions) -> int:
                 )
 
         elif options.wait_for_endpoint:
-            wait_for_attached_endpoint(
+            route = wait_for_attached_endpoint(
                 endpoint_host=endpoint_host,
                 shared_base_url=shared_base_url,
+                direct_base_url=direct_base_url,
+                preferred_model=resolved.display_model,
                 proxy_token=credential.combined,
                 timeout_seconds=options.startup_timeout,
             )
+        else:
+            print(
+                "WARNING: readiness waiting is disabled; Codex may fail until the route is live.",
+                file=sys.stderr,
+            )
+
+        reasoning_effort = resolved.reasoning_effort
+        reasoning_levels = resolved.reasoning_levels
+        if route.source.startswith("direct"):
+            reasoning_effort, reasoning_levels = _direct_reasoning_settings(
+                reasoning_effort, reasoning_levels
+            )
+            if reasoning_effort != resolved.reasoning_effort:
+                print(
+                    f"Direct Responses route cannot stream reasoning effort "
+                    f"{resolved.reasoning_effort!r}; using {reasoning_effort!r}."
+                )
+
+        settings = ModelSettings(
+            slug=route.model_slug,
+            display_model=resolved.display_model,
+            context_window=resolved.context_window,
+            reasoning_effort=reasoning_effort,
+            reasoning_levels=reasoning_levels,
+            provider_base_url=route.base_url,
+            persist_history=options.persist_history,
+        )
+        configuration = prepare_run_configuration(
+            settings,
+            workspace=workspace,
+            proxy_token=credential.combined,
+            validate_strict=True,
+        )
+        if options.hf_token_env:
+            configuration.environment.pop(options.hf_token_env, None)
 
         print(
-            f"Launching Codex with model {endpoint_host} and an isolated Modal-only config..."
+            f"Launching Codex with model {route.model_slug} through the "
+            f"{route.source} Responses route and an isolated Modal-only config..."
         )
         return run_process_with_heartbeat(
             configuration.command_prefix() + options.codex_arguments,
@@ -365,7 +425,8 @@ def _run(options: WrapperOptions) -> int:
                         + _stop_command(owned_endpoint_id, options.environment_name),
                         file=sys.stderr,
                     )
-        configuration.clean_up()
+        if configuration is not None:
+            configuration.clean_up()
 
 
 def _main(arguments: list[str]) -> int:

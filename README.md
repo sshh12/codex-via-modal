@@ -103,7 +103,8 @@ On a normal inference launch the wrapper:
 2. Recovers any stale endpoint with a wrapper-owned state record.
 3. Creates a unique Modal endpoint and resolves its exact `ep-...` ID.
 4. Starts an embedded detached watchdog via `python -m codex_modal __watchdog ...`.
-5. Waits for both Modal status and the shared Responses route.
+5. Waits for Modal's `live` status, then selects either the shared Responses route or
+   a capability-checked direct `/v1/responses` route.
 6. Runs Codex in the directory from which you invoked the launcher.
 7. Stops only that exact endpoint ID in `finally`; the watchdog retries after a crash.
 
@@ -134,19 +135,21 @@ leaves the endpoint resource deployed.
 
 Codex runs with `CODEX_HOME` set to the git-ignored `.codex-modal/codex-home`, not the
 user's normal `~/.codex`. Each concurrent run receives a unique profile and catalog.
-The catalog contains exactly one model: the Modal endpoint hostname used by the shared
-Responses API.
+The catalog contains exactly one model: the endpoint hostname on Modal's shared route,
+or the Hugging Face repo ID when using the endpoint's direct route.
 
-Modal also exposes each endpoint's direct server URL with
-`/v1/chat/completions`, where the request model is the Hugging Face repo ID. That route
-is useful for `curl` diagnostics, but Codex 0.146.1 custom providers require the
-Responses wire API. The wrapper therefore uses Modal's shared `/v1/responses` adapter,
-not the direct Chat Completions URL.
+Codex 0.146.1 custom providers require the Responses wire API. The wrapper prefers
+Modal's documented shared route when the endpoint is registered there. If registration
+is delayed or missing, it checks the direct server's OpenAPI document for
+`/v1/responses` and uses that route with the Hugging Face repo ID. Direct SGLang
+Responses streaming currently rejects reasoning levels above `high`, so the wrapper
+maps `max`, `xhigh`, or `ultra` to `high` only when using that fallback.
 
 The wrapper applies these controls at CLI precedence, above project config:
 
 - Main model, review model, default subagent model, provider, and catalog are pinned.
-- The provider is the Modal shared Responses URL with `requires_openai_auth = false`.
+- The provider is the selected Modal Responses URL with
+  `requires_openai_auth = false`.
 - OpenAI/Codex API credentials and base-URL overrides are removed from the Codex child
   environment.
 - Analytics and feedback are disabled. OpenTelemetry log, metric, and trace exporters

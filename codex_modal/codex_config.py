@@ -69,7 +69,7 @@ enabled = false
 approvals_reviewer = "user"
 
 [model_providers.modal]
-name = "Modal Shared Endpoints (isolated)"
+name = "Modal Endpoints (isolated)"
 base_url = "https://inference.us-west.modal.direct/v1"
 env_key = "MODAL_PROXY_TOKEN"
 wire_api = "responses"
@@ -100,7 +100,7 @@ class ModelSettings:
     context_window: int
     reasoning_effort: str
     reasoning_levels: tuple[str, ...]
-    shared_base_url: str
+    provider_base_url: str
     persist_history: bool
 
 
@@ -324,8 +324,8 @@ enabled = false
 default_subagent_model = {toml_string(settings.slug)}
 
 [model_providers.modal]
-name = "Modal Shared Endpoints (isolated)"
-base_url = {toml_string(settings.shared_base_url)}
+name = "Modal Endpoints (isolated)"
+base_url = {toml_string(settings.provider_base_url)}
 env_key = "MODAL_PROXY_TOKEN"
 env_key_instructions = "Run codex-modal setup or set MODAL_PROXY_TOKEN."
 wire_api = "responses"

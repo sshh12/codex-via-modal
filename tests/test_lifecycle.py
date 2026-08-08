@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,72 @@ from codex_modal import lifecycle
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_direct_endpoint_url_matches_modal_server_naming(self) -> None:
+        self.assertEqual(
+            lifecycle.direct_endpoint_base_url("workspace", "my-endpoint", "us-west"),
+            "https://workspace--ep-my-endpoint-server.us-west.modal.direct/v1",
+        )
+
+    def test_route_falls_back_to_direct_responses_capability(self) -> None:
+        shared = "https://inference.us-west.modal.direct/v1"
+        direct = "https://workspace--ep-model-server.us-west.modal.direct/v1"
+
+        def document(url: str, _token: str) -> dict:
+            if url == f"{shared}/models":
+                return {"data": []}
+            if url == f"{direct}/models":
+                return {"data": [{"id": "org/model"}]}
+            if url == direct.removesuffix("/v1") + "/openapi.json":
+                return {"paths": {"/v1/responses": {}}}
+            raise AssertionError(url)
+
+        with patch.object(lifecycle, "_authenticated_json", side_effect=document):
+            route = lifecycle._wait_for_available_route(
+                endpoint_host="endpoint.us-west.modal.direct",
+                shared_base_url=shared,
+                direct_base_url=direct,
+                preferred_model="org/model",
+                proxy_token="wk-test.ws-test",
+                deadline=time.monotonic() + 1,
+                state_path=None,
+            )
+
+        self.assertEqual(route.model_slug, "org/model")
+        self.assertEqual(route.base_url, direct)
+        self.assertEqual(route.source, "direct")
+
+    def test_live_status_advances_to_route_readiness(self) -> None:
+        endpoint_id = "ep-" + "A" * 22
+        expected = lifecycle.EndpointRoute(
+            model_slug="org/model",
+            base_url="https://example.invalid/v1",
+            source="direct",
+        )
+        with (
+            patch.object(
+                lifecycle.modal_cli,
+                "list_endpoints",
+                return_value=[{"endpoint_id": endpoint_id, "status": "live"}],
+            ),
+            patch.object(
+                lifecycle, "_wait_for_available_route", return_value=expected
+            ) as wait,
+        ):
+            result = lifecycle.wait_for_endpoint(
+                endpoint_id=endpoint_id,
+                endpoint_host="endpoint.us-west.modal.direct",
+                environment_name=None,
+                shared_base_url="https://inference.us-west.modal.direct/v1",
+                direct_base_url="https://workspace--ep-endpoint-server.us-west.modal.direct/v1",
+                preferred_model="org/model",
+                proxy_token="wk-test.ws-test",
+                timeout_seconds=30,
+                state_path=None,
+            )
+
+        self.assertEqual(result, expected)
+        wait.assert_called_once()
+
     def test_current_process_has_stable_identity(self) -> None:
         identity = lifecycle.process_identity(os.getpid())
         self.assertIsNotNone(identity)

@@ -13,11 +13,28 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import modal_cli
 from .paths import PROJECT_ROOT, RUNTIME_ROOT, ensure_state_dirs
+
+
+@dataclass(frozen=True)
+class EndpointRoute:
+    model_slug: str
+    base_url: str
+    source: str
+
+
+def direct_endpoint_base_url(
+    workspace_slug: str, endpoint_name: str, routing_region: str
+) -> str:
+    return (
+        f"https://{workspace_slug}--ep-{endpoint_name}-server."
+        f"{routing_region}.modal.direct/v1"
+    )
 
 
 def _utc_now() -> str:
@@ -318,14 +335,16 @@ def wait_for_endpoint(
     endpoint_host: str,
     environment_name: str | None,
     shared_base_url: str,
+    direct_base_url: str,
+    preferred_model: str,
     proxy_token: str,
     timeout_seconds: int,
     state_path: Path | None,
-) -> None:
+) -> EndpointRoute:
     deadline = time.monotonic() + timeout_seconds
     last_status: str | None = None
     last_list_error: str | None = None
-    ready_statuses = {"running", "ready", "succeeded", "active", "deployed"}
+    ready_statuses = {"running", "ready", "succeeded", "active", "deployed", "live"}
     failed_words = ("failed", "cancelled", "canceled", "stopped", "error")
 
     while time.monotonic() < deadline:
@@ -359,9 +378,11 @@ def wait_for_endpoint(
             f"Timed out after {timeout_seconds} seconds provisioning {endpoint_id}."
         )
 
-    _wait_for_shared_route(
+    return _wait_for_available_route(
         endpoint_host=endpoint_host,
         shared_base_url=shared_base_url,
+        direct_base_url=direct_base_url,
+        preferred_model=preferred_model,
         proxy_token=proxy_token,
         deadline=deadline,
         state_path=state_path,
@@ -372,45 +393,71 @@ def wait_for_attached_endpoint(
     *,
     endpoint_host: str,
     shared_base_url: str,
+    direct_base_url: str,
+    preferred_model: str,
     proxy_token: str,
     timeout_seconds: int,
-) -> None:
-    print(f"Waiting for attached Modal Responses route: {endpoint_host}")
-    _wait_for_shared_route(
+) -> EndpointRoute:
+    print(f"Waiting for attached Modal endpoint: {endpoint_host}")
+    return _wait_for_available_route(
         endpoint_host=endpoint_host,
         shared_base_url=shared_base_url,
+        direct_base_url=direct_base_url,
+        preferred_model=preferred_model,
         proxy_token=proxy_token,
         deadline=time.monotonic() + timeout_seconds,
         state_path=None,
     )
 
 
-def _wait_for_shared_route(
+def _authenticated_json(url: str, proxy_token: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {proxy_token}"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        document = json.loads(response.read().decode("utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError(f"{url} returned a non-object JSON document")
+    return document
+
+
+def _document_model_ids(document: dict[str, Any]) -> set[str]:
+    rows = document.get("data", [])
+    return {
+        str(row.get("id"))
+        for row in rows
+        if isinstance(row, dict) and row.get("id")
+    }
+
+
+def _wait_for_available_route(
     *,
     endpoint_host: str,
     shared_base_url: str,
+    direct_base_url: str,
+    preferred_model: str,
     proxy_token: str,
     deadline: float,
     state_path: Path | None,
-) -> None:
-    models_url = f"{shared_base_url.rstrip('/')}/models"
+) -> EndpointRoute:
+    shared_models_url = f"{shared_base_url.rstrip('/')}/models"
+    direct_models_url = f"{direct_base_url.rstrip('/')}/models"
+    direct_openapi_url = (
+        f"{direct_base_url.rstrip('/').removesuffix('/v1')}/openapi.json"
+    )
+    direct_supports_responses: bool | None = None
+
     while time.monotonic() < deadline:
         heartbeat(state_path)
-        request = urllib.request.Request(
-            models_url,
-            headers={"Authorization": f"Bearer {proxy_token}"},
-            method="GET",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                document = json.loads(response.read().decode("utf-8"))
-            rows = document.get("data", []) if isinstance(document, dict) else []
-            model_ids = {
-                str(row.get("id")) for row in rows if isinstance(row, dict) and row.get("id")
-            }
-            if endpoint_host in model_ids:
+            shared_ids = _document_model_ids(
+                _authenticated_json(shared_models_url, proxy_token)
+            )
+            if endpoint_host in shared_ids:
                 print(f"Modal shared Responses route is ready: {endpoint_host}")
-                return
+                return EndpointRoute(endpoint_host, shared_base_url, "shared")
         except urllib.error.HTTPError as error:
             if error.code in (401, 403):
                 raise RuntimeError(
@@ -419,10 +466,59 @@ def _wait_for_shared_route(
                 ) from error
         except (OSError, ValueError, json.JSONDecodeError):
             pass
+
+        direct_model: str | None = None
+        try:
+            direct_ids = _document_model_ids(
+                _authenticated_json(direct_models_url, proxy_token)
+            )
+            if preferred_model in direct_ids:
+                direct_model = preferred_model
+            elif len(direct_ids) == 1:
+                direct_model = next(iter(direct_ids))
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                raise RuntimeError(
+                    f"Modal direct endpoint authentication failed (HTTP {error.code}). "
+                    "Check the proxy token."
+                ) from error
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+
+        if direct_model is not None and direct_supports_responses is None:
+            try:
+                openapi = _authenticated_json(direct_openapi_url, proxy_token)
+                paths = openapi.get("paths", {})
+                direct_supports_responses = (
+                    isinstance(paths, dict) and "/v1/responses" in paths
+                )
+            except urllib.error.HTTPError as error:
+                if error.code in (401, 403):
+                    raise RuntimeError(
+                        f"Modal direct endpoint authentication failed (HTTP {error.code}). "
+                        "Check the proxy token."
+                    ) from error
+                if error.code == 404:
+                    direct_supports_responses = False
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+
+        if direct_model is not None and direct_supports_responses:
+            if direct_model != preferred_model:
+                print(
+                    f"Direct endpoint advertises {direct_model}; using that model ID "
+                    f"instead of configured {preferred_model}."
+                )
+            print(
+                "Modal shared registration is unavailable; using the direct "
+                f"Responses route: {direct_base_url}"
+            )
+            return EndpointRoute(direct_model, direct_base_url, "direct")
+
         time.sleep(5)
     raise RuntimeError(
-        "The endpoint did not appear in Modal's shared Responses model list before the "
-        "startup timeout."
+        "Neither Modal's shared Responses registry nor the endpoint's direct Responses "
+        "route became available before the startup timeout."
     )
 
 

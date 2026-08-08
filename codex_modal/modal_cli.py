@@ -16,6 +16,10 @@ from .paths import PROJECT_ROOT
 
 ENDPOINT_ID_PATTERN = re.compile(r"^ep-[A-Za-z0-9]{22}$")
 ENDPOINT_ID_SEARCH = re.compile(r"\b(ep-[A-Za-z0-9]{22})\b")
+WORKSPACE_LINE = re.compile(
+    r"^Workspace:\s+([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\s+\(ac-[A-Za-z0-9]+\)\s*$",
+    re.MULTILINE,
+)
 
 
 def command(*arguments: str) -> list[str]:
@@ -61,6 +65,24 @@ def token_login_present() -> bool:
         return _completed(["token", "info"], timeout=30).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+def current_workspace_slug() -> str:
+    """Return the workspace DNS slug used in authenticated Modal server URLs."""
+
+    try:
+        result = _completed(["token", "info"], timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"Reading the active Modal workspace failed: {error}") from error
+    if result.returncode != 0:
+        raise _failure("Reading the active Modal workspace", result)
+    match = WORKSPACE_LINE.search(result.stdout)
+    if match is None:
+        raise RuntimeError(
+            "Modal authentication is configured, but codex-modal could not parse the "
+            "workspace slug from `modal token info`."
+        )
+    return match.group(1)
 
 
 def interactive_login() -> None:
