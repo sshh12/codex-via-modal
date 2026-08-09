@@ -69,44 +69,33 @@ def _environment_doc(spec: dict[str, object]) -> str:
         else "any public host"
     )
     note = str(spec.get("env_note") or "").strip()
-    note_block = f"\n## Task notes\n{note}\n" if note else ""
+    note_block = f"\nTask notes: {note}\n" if note else ""
     return f"""{ENV_DOC_BEGIN}
 # Runtime environment
 
-You are running as an agent inside a disposable Debian-based Linux container on
-the user's machine, launched by `codex-modal --docker`. Approvals and Codex's own
-sandbox are intentionally disabled: run commands directly and freely. The
-container is the security boundary, so you cannot see or reach the host machine.
+Disposable Debian Linux container on the user's machine. Approvals and Codex's
+sandbox are off on purpose: run commands directly. The container is the boundary
+and is discarded on exit, so you cannot see or reach the host; work freely in
+`/work` (HOME is `/home/agent`).
 
-## Permissions
-- You start as the unprivileged user `agent` with **passwordless `sudo`**; use it
-  to install system packages or make system changes as needed.
-- The root filesystem is writable and this container is thrown away on exit.
-- The working directory `/work` is where your task lives; `$HOME` is `/home/agent`.
-
-## Networking
-- You have outbound internet **only through an HTTP/HTTPS proxy** (already set in
-  `http_proxy`/`https_proxy`), on port(s) {ports}, to {host_line}.
-- The host, the local LAN, link-local, and cloud-metadata addresses are blocked;
-  there is no direct socket egress and no external DNS (the proxy resolves names).
-- `apt`, `pip`, `npm`, `curl`, and `git` are already configured to use the proxy.
-
-## Preinstalled tooling
-- Languages/build: Python 3 (+pip/uv), Node.js (+npm/pnpm), Go, Rust (cargo),
-  a JDK, and gcc/clang/make/cmake/gdb.
-- Utilities: git, ripgrep, fd, jq, yq, sqlite3, ffmpeg, imagemagick, and common
-  debugging tools (strace/ltrace, via SYS_PTRACE).
-- Networking/recon: nmap, tcpdump, netcat, socat, dig/host, whois.
-- Browser automation: a headless **Chromium** at `/usr/bin/chromium`, driveable
-  with Playwright (Python) or `puppeteer-core` (Node). Launch it with
-  `--no-sandbox --disable-dev-shm-usage`; set `executable_path=/usr/bin/chromium`.
-- Install anything else you need with `sudo apt-get install`, `pip install`, or
-  `npm install` (`pip`/`npm` global installs work without sudo).
-
-## Working tips
-- This is a throwaway container, not a shared repo. Creating plain data or output
-  files with shell redirection or a heredoc is fine; reserve `apply_patch` for
-  source code you are editing. Don't deliberate over which to use.
+- Root: you are user `agent` with passwordless `sudo`; the rootfs is writable.
+- Network: internet only via the preset HTTP/HTTPS proxy, port(s) {ports}, {host_line};
+  no direct egress and no external DNS (the proxy resolves names). apt/pip/npm/
+  curl/git are already proxy-configured. The host and LAN are unreachable.
+- Installed: Python (pip/uv), Node (npm/pnpm), Go, Rust, JDK, gcc/clang/make/
+  cmake/gdb; git, ripgrep, jq, sqlite3, ffmpeg; nmap, tcpdump, netcat, socat,
+  dig, whois; headless Chromium at `/usr/bin/chromium`. Install anything else
+  with `sudo apt-get`, `pip`, or `npm`.
+- Chromium: drive with Playwright (Python) or puppeteer-core; launch with
+  `executable_path=/usr/bin/chromium` and args `--no-sandbox --disable-dev-shm-usage`.
+  For external sites, point the browser at the proxy (Chromium ignores the env
+  proxy): Playwright `proxy={{"server": "$HTTP_PROXY"}}`.
+- LLM: an OpenAI-compatible endpoint for the same model you run is at
+  `$SANDBOX_MODEL_BASE_URL` (model `$SANDBOX_MODEL_NAME`); no API key needed (the
+  proxy adds auth). Use it for sub-tasks, e.g. POST `.../chat/completions` or
+  `.../responses`.
+- Files: creating data/output files with shell redirection or a heredoc is fine;
+  reserve `apply_patch` for source you edit. Don't deliberate over which to use.
 {note_block}{ENV_DOC_END}
 """
 
@@ -213,6 +202,11 @@ def main(argv: list[str] | None = None) -> int:
 
     environment = configuration.environment
     environment.setdefault("RUST_LOG", str(spec.get("rust_log", "info")))
+    # Let the agent call the same model for its own LLM sub-tasks. The broker's
+    # model port is OpenAI-compatible and injects the credential, so no key is
+    # needed inside the sandbox.
+    environment["SANDBOX_MODEL_BASE_URL"] = settings.provider_base_url
+    environment["SANDBOX_MODEL_NAME"] = settings.slug
     for key, value in dict(spec.get("environment", {}) or {}).items():
         environment[str(key)] = str(value)
 

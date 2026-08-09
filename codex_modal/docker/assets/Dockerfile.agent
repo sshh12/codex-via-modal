@@ -21,7 +21,7 @@ RUN set -eux; \
         nmap tcpdump whois net-tools \
         build-essential pkg-config make cmake automake autoconf gdb \
         clang lld llvm binutils file patch \
-        python3 python3-pip python3-venv python3-dev pipx \
+        python3 python3-pip python3-venv python3-dev python-is-python3 pipx \
         golang \
         default-jdk-headless \
         ripgrep fd-find fzf jq yq bat tree less vim nano tmux \
@@ -115,6 +115,14 @@ ENV HOME=/home/agent \
     GOPATH=/home/agent/go \
     GOFLAGS=-buildvcs=false \
     PATH=/home/agent/.local/bin:/home/agent/.npm-global/bin:/home/agent/go/bin:/opt/cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Codex runs commands through `bash -lc`; a login shell resets PATH from
+# /etc/profile and would drop the additions above. Re-add them for login shells
+# so user-installed CLIs (pip --user, npm -g) and the language toolchains resolve.
+RUN printf '%s\n' \
+    'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/go/bin:/opt/cargo/bin:/usr/local/go/bin:$PATH"' \
+    > /etc/profile.d/10-devbox-path.sh; \
+    chmod 0644 /etc/profile.d/10-devbox-path.sh
 
 WORKDIR /work
 ENTRYPOINT ["/bin/sh", "/sandbox/agent-init.sh"]
