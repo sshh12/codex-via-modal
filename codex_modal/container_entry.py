@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from pathlib import Path
 
 from .codex_config import ModelSettings, prepare_run_configuration
 from .options import first_codex_word
+from .paths import CODEX_HOME
 
 RUN_SPEC_PATH = Path("/sandbox/run.json")
 PLACEHOLDER_TOKEN = "wk-sandbox-no-credential.ws-sandbox-no-credential"
@@ -94,6 +96,11 @@ and is discarded on exit, so you cannot see or reach the host; work freely in
   `$SANDBOX_MODEL_BASE_URL` (model `$SANDBOX_MODEL_NAME`); no API key needed (the
   proxy adds auth). Use it for sub-tasks, e.g. POST `.../chat/completions` or
   `.../responses`.
+- Subagents: you can delegate by running Codex recursively —
+  `codex exec --skip-git-repo-check "<task>"` spawns a fresh independent agent on
+  the same model (it inherits this config). Run several with `&` + `wait` for
+  parallel fan-out; wrap it in a script if that helps. Each subagent is one-shot
+  (no shared live context) — pass what it needs in the task and via files.
 - Files: creating data/output files with shell redirection or a heredoc is fine;
   reserve `apply_patch` for source you edit. Don't deliberate over which to use.
 {note_block}{ENV_DOC_END}
@@ -157,6 +164,50 @@ def _prepare_workspace(workspace: Path) -> None:
         )
 
 
+def _enable_recursive_codex(settings, catalog_path: Path) -> None:
+    """Make a bare `codex exec` inside the container reuse this run's model.
+
+    The parent receives model/provider/catalog via -c flags, so `config.toml`
+    alone doesn't pin them. Writing them into the container's CODEX_HOME lets a
+    subagent (`codex exec "..."`) inherit the same isolated Modal-only route with
+    no flags. Container-only: the host's config is never touched.
+    """
+
+    config = CODEX_HOME / "config.toml"
+    try:
+        text = config.read_text(encoding="utf-8")
+    except OSError:
+        return
+    # Point the provider at the broker's model port (the base config carries a
+    # default us-west URL we must not leave in place for children).
+    new_url = f'base_url = {json.dumps(settings.provider_base_url)}'
+    text = re.sub(r'(?m)^base_url = .*$', new_url, text, count=1)
+    compact = max(8192, int(settings.context_window * 0.90))
+    # These are top-level keys, so they must be inserted before the first TOML
+    # table header — appending at the end would scope them under the last table.
+    block = (
+        "\n# A bare `codex exec` runs as an isolated subagent on the same model.\n"
+        "# The container is the boundary, so subagents also run yolo.\n"
+        f"model = {json.dumps(settings.slug)}\n"
+        'model_provider = "modal"\n'
+        f"model_catalog_json = {json.dumps(str(catalog_path))}\n"
+        f"model_context_window = {settings.context_window}\n"
+        f"model_auto_compact_token_limit = {compact}\n"
+        f"model_reasoning_effort = {json.dumps(settings.reasoning_effort)}\n"
+        'approval_policy = "never"\n'
+        'sandbox_mode = "danger-full-access"\n'
+    )
+    match = re.search(r'(?m)^\[', text)
+    if match:
+        merged = text[: match.start()] + block + "\n" + text[match.start() :]
+    else:
+        merged = text + block
+    try:
+        config.write_text(merged, encoding="utf-8", newline="\n")
+    except OSError as error:
+        print(f"codex-sandbox: could not enable recursive codex: {error}", file=sys.stderr)
+
+
 def build_command(
     prefix: list[str], codex_arguments: list[str], *, danger: bool
 ) -> list[str]:
@@ -196,6 +247,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     codex_arguments = [str(item) for item in spec.get("codex_arguments", [])] + extra
     danger = bool(spec.get("danger", True))
+    if danger:
+        # Enable bare `codex exec` recursion (subagents) inside the yolo sandbox.
+        _enable_recursive_codex(settings, configuration.catalog_path)
     codex_command = build_command(
         configuration.command_prefix(), codex_arguments, danger=danger
     )
