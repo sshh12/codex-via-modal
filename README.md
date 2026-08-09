@@ -5,6 +5,8 @@ Endpoints and a generic self-managed SGLang app for models outside the catalog. 
 is launched with an isolated, Modal-only configuration; wrapper-owned resources are
 cleaned up on exit.
 
+<img width="897" height="313" alt="Code_LtxLIER9F5" src="https://github.com/user-attachments/assets/65793242-3629-4959-9f5e-9b2a2f4af000" />
+
 ## Quick start
 
 Requires Python 3.10+, `codex-cli 0.146.1`, the `codex` executable on `PATH`, and a
