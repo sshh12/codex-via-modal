@@ -55,6 +55,28 @@ class WrapperOptions:
     dry_run: bool = False
     pick: bool = False
     force_token: bool = False
+    docker: bool = False
+    docker_build: bool = False
+    docker_upstream: str | None = None
+    docker_upstream_auth_env: str | None = None
+    docker_model_slug: str | None = None
+    docker_image: str | None = None
+    docker_codex_version: str | None = None
+    docker_packages: str | None = None
+    docker_allow_ports: list[int] = field(default_factory=list)
+    docker_allow_hosts: list[str] = field(default_factory=list)
+    docker_firewall: str = "enforce"
+    docker_memory: str | None = None
+    docker_cpus: str | None = None
+    docker_pids: int | None = None
+    docker_copy_in: str | None = None
+    docker_export: str | None = None
+    docker_export_work: bool = False
+    docker_keep: bool = False
+    docker_shell: bool = False
+    docker_rust_log: str | None = None
+    docker_env_note: str | None = None
+    docker_no_env_doc: bool = False
     codex_arguments: list[str] = field(default_factory=list)
 
 
@@ -93,7 +115,30 @@ VALUE_OPTIONS = {
     "--modal-reasoning-effort": "reasoning_effort",
     "--modal-reasoning-levels": "reasoning_levels",
     "--modal-startup-timeout": "startup_timeout",
+    "--docker-upstream": "docker_upstream",
+    "--docker-upstream-auth-env": "docker_upstream_auth_env",
+    "--docker-model-slug": "docker_model_slug",
+    "--docker-image": "docker_image",
+    "--docker-codex-version": "docker_codex_version",
+    "--docker-packages": "docker_packages",
+    "--docker-firewall": "docker_firewall",
+    "--docker-memory": "docker_memory",
+    "--docker-cpus": "docker_cpus",
+    "--docker-pids": "docker_pids",
+    "--docker-copy-in": "docker_copy_in",
+    "--docker-export": "docker_export",
+    "--docker-rust-log": "docker_rust_log",
+    "--docker-env-note": "docker_env_note",
 }
+
+REPEATED_OPTIONS = {
+    "--modal-compute-region": "compute_regions",
+    "--modal-sglang-arg": "sglang_args",
+    "--docker-allow-port": "docker_allow_ports",
+    "--docker-allow-host": "docker_allow_hosts",
+}
+
+DOCKER_FIREWALL_MODES = {"enforce", "warn", "off"}
 
 
 def _set_action(options: WrapperOptions, action: str) -> None:
@@ -114,17 +159,19 @@ def parse_arguments(arguments: list[str]) -> WrapperOptions:
             options.codex_arguments.append("--")
             options.codex_arguments.extend(arguments[index + 1 :])
             break
-        if argument in VALUE_OPTIONS or argument in {
-            "--modal-compute-region",
-            "--modal-sglang-arg",
-        }:
+        if argument in VALUE_OPTIONS or argument in REPEATED_OPTIONS:
             if index + 1 >= len(arguments):
                 raise ValueError(f"{argument} requires a value.")
             value = arguments[index + 1]
-            if argument == "--modal-compute-region":
-                options.compute_regions.append(value)
-            elif argument == "--modal-sglang-arg":
-                options.sglang_args.append(value)
+            if argument in REPEATED_OPTIONS:
+                target = getattr(options, REPEATED_OPTIONS[argument])
+                if argument == "--docker-allow-port":
+                    try:
+                        target.append(int(value))
+                    except ValueError as error:
+                        raise ValueError("--docker-allow-port requires an integer.") from error
+                else:
+                    target.append(value)
             else:
                 attribute = VALUE_OPTIONS[argument]
                 if attribute in {
@@ -134,6 +181,7 @@ def parse_arguments(arguments: list[str]) -> WrapperOptions:
                     "memory",
                     "scaledown_window",
                     "target_inputs",
+                    "docker_pids",
                 }:
                     try:
                         value = int(value)
@@ -168,7 +216,21 @@ def parse_arguments(arguments: list[str]) -> WrapperOptions:
             options.dry_run = True
         elif argument == "--modal-force-token":
             options.force_token = True
-        elif argument.startswith("--modal-"):
+        elif argument == "--docker":
+            options.docker = True
+        elif argument == "--docker-build":
+            options.docker_build = True
+        elif argument == "--docker-export-work":
+            options.docker_export_work = True
+        elif argument == "--docker-keep":
+            options.docker_keep = True
+        elif argument == "--docker-shell":
+            options.docker_shell = True
+        elif argument == "--docker-no-env-doc":
+            options.docker_no_env_doc = True
+        elif argument == "--docker-prune":
+            _set_action(options, "docker-prune")
+        elif argument.startswith("--modal-") or argument.startswith("--docker-"):
             raise ValueError(f"Unknown wrapper option {argument!r}. Run codex-modal --modal-help.")
         else:
             options.codex_arguments.append(argument)
@@ -177,7 +239,93 @@ def parse_arguments(arguments: list[str]) -> WrapperOptions:
     return options
 
 
+SANDBOX_POLICY_ARGUMENTS = (
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "--approve-for-me",
+    "--dangerously-bypass-approvals-and-sandbox",
+)
+
+
+def codex_sets_own_policy(arguments: list[str]) -> bool:
+    """True when the caller already chose an approval/sandbox policy for Codex."""
+
+    for argument in _before_double_dash(arguments):
+        if argument in SANDBOX_POLICY_ARGUMENTS:
+            return True
+        if any(
+            argument.startswith(f"{option}=")
+            for option in SANDBOX_POLICY_ARGUMENTS
+            if option.startswith("--")
+        ):
+            return True
+        if re.fullmatch(r"-[sa].+", argument):
+            return True
+    return False
+
+
+def _validate_docker_options(options: WrapperOptions) -> None:
+    supplied = [
+        name
+        for name, value in (
+            ("--docker-build", options.docker_build),
+            ("--docker-upstream", options.docker_upstream),
+            ("--docker-upstream-auth-env", options.docker_upstream_auth_env),
+            ("--docker-model-slug", options.docker_model_slug),
+            ("--docker-image", options.docker_image),
+            ("--docker-codex-version", options.docker_codex_version),
+            ("--docker-packages", options.docker_packages),
+            ("--docker-allow-port", options.docker_allow_ports),
+            ("--docker-allow-host", options.docker_allow_hosts),
+            ("--docker-memory", options.docker_memory),
+            ("--docker-cpus", options.docker_cpus),
+            ("--docker-pids", options.docker_pids),
+            ("--docker-copy-in", options.docker_copy_in),
+            ("--docker-export", options.docker_export),
+            ("--docker-export-work", options.docker_export_work),
+            ("--docker-keep", options.docker_keep),
+            ("--docker-shell", options.docker_shell),
+            ("--docker-env-note", options.docker_env_note),
+            ("--docker-no-env-doc", options.docker_no_env_doc),
+            ("--docker-rust-log", options.docker_rust_log),
+        )
+        if value
+    ]
+    if options.docker_firewall != "enforce":
+        supplied.append("--docker-firewall")
+    if not options.docker and options.action == "run" and supplied:
+        raise ValueError(f"{supplied[0]} requires --docker.")
+    if not options.docker:
+        return
+    if options.docker_firewall not in DOCKER_FIREWALL_MODES:
+        raise ValueError(
+            "--docker-firewall must be one of: "
+            + ", ".join(sorted(DOCKER_FIREWALL_MODES))
+            + "."
+        )
+    if options.docker_upstream is not None:
+        if not re.match(r"^https?://[^\s/]+", options.docker_upstream):
+            raise ValueError("--docker-upstream must be an http:// or https:// base URL.")
+    elif options.docker_upstream_auth_env:
+        raise ValueError("--docker-upstream-auth-env requires --docker-upstream.")
+    if options.docker_upstream and (
+        options.self_managed or options.use_endpoint or options.use_app
+    ):
+        raise ValueError(
+            "--docker-upstream replaces the Modal provider entirely; it cannot be "
+            "combined with Modal deployment or attach options."
+        )
+    for port in options.docker_allow_ports:
+        if not 1 <= port <= 65535:
+            raise ValueError(f"--docker-allow-port {port} is out of range.")
+    if options.docker_pids is not None and options.docker_pids < 32:
+        raise ValueError("--docker-pids must be at least 32.")
+
+
 def validate_wrapper_options(options: WrapperOptions) -> None:
+    _validate_docker_options(options)
     if options.context_window is not None and options.context_window < 8192:
         raise ValueError("--modal-context-window must be at least 8192.")
     if options.startup_timeout < 30:

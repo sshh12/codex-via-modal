@@ -35,16 +35,18 @@ from .lifecycle import (
     wait_for_direct_app,
     wait_for_endpoint,
 )
+from .docker import SandboxOptions, SandboxSpec, run_sandbox
 from .options import (
     WrapperOptions,
     assert_isolated_codex_arguments,
     codex_needs_inference,
+    codex_sets_own_policy,
     endpoint_target,
     load_presets,
     parse_arguments,
     resolve_model,
 )
-from .paths import CODEX_HOME, caller_cwd
+from .paths import CODEX_HOME, STATE_ROOT, caller_cwd
 
 
 HELP = r'''codex-modal - run Codex exclusively through a lifecycle-managed Modal endpoint
@@ -96,6 +98,30 @@ Endpoint placement/lifecycle:
   --modal-no-wait                    Launch Codex before readiness is confirmed
   --modal-keep-endpoint              Keep a newly-created endpoint after Codex exits
   --modal-cleanup                    Recover stale wrapper-owned endpoints
+
+Local Docker sandbox (Codex runs in yolo mode, isolated from this machine):
+  --docker                           Run Codex in a throwaway container instead of here
+  --docker-upstream URL              OpenAI-compatible base URL; skips Modal entirely
+  --docker-upstream-auth-env ENV     Host env var holding that upstream's token
+  --docker-model-slug SLUG           Model name sent to a --docker-upstream server
+  --docker-allow-port PORT           Repeat to widen the egress port allow-list (80,443)
+  --docker-allow-host HOST           Repeat to restrict egress to these hosts (.suffix ok)
+  --docker-firewall MODE             enforce (default), warn, or off
+  --docker-copy-in DIR               Copy a directory into the sandbox workspace
+  --docker-export DIR                Where to write logs (default .codex-modal/docker-runs)
+  --docker-export-work               Also copy the sandbox workspace back out
+  --docker-rust-log SPEC             RUST_LOG for Codex inside the container
+  --docker-memory / --docker-cpus / --docker-pids
+                                     Container resource caps (4g / 2 / 1024)
+  --docker-image REF                 Use an existing local sandbox image
+  --docker-codex-version VER         Codex npm version baked into the image
+  --docker-packages "A B"            Extra apt packages for the sandbox image
+  --docker-build                     Force a rebuild of the sandbox images
+  --docker-keep                      Keep containers/volumes for post-mortem
+  --docker-shell                     Open a shell in the sandbox instead of Codex
+  --docker-env-note TEXT             Extra text appended to the sandbox AGENTS.md
+  --docker-no-env-doc                Do not auto-write the environment AGENTS.md
+  --docker-prune                     Remove leftover sandbox containers/networks/volumes
 
 Setup and behavior:
   setup, --modal-setup               Login and create/store a Modal proxy token once
@@ -265,11 +291,110 @@ def _volume_delete_command(volume_name: str, environment_name: str | None) -> st
     return shlex.join(arguments)
 
 
+def _sandbox_options(options: WrapperOptions) -> SandboxOptions:
+    from .docker.sandbox import DEFAULT_CODEX_VERSION
+
+    danger = not codex_sets_own_policy(options.codex_arguments)
+    if not danger:
+        print(
+            "An explicit Codex approval/sandbox option was supplied, so the container "
+            "will not run Codex in bypass mode."
+        )
+    return SandboxOptions(
+        codex_version=options.docker_codex_version or DEFAULT_CODEX_VERSION,
+        agent_image=options.docker_image,
+        build=options.docker_build,
+        extra_packages=options.docker_packages or "",
+        allow_ports=tuple(options.docker_allow_ports) or (80, 443),
+        allow_hosts=tuple(options.docker_allow_hosts),
+        firewall=options.docker_firewall,
+        memory=options.docker_memory or "4g",
+        cpus=options.docker_cpus or "2",
+        pids_limit=options.docker_pids or 1024,
+        copy_in=Path(options.docker_copy_in).expanduser() if options.docker_copy_in else None,
+        export_dir=Path(options.docker_export).expanduser() if options.docker_export else None,
+        export_work=options.docker_export_work,
+        keep=options.docker_keep,
+        rust_log=options.docker_rust_log or "error",
+        danger=danger,
+        command=("/bin/bash",) if options.docker_shell else (),
+        env_doc=not options.docker_no_env_doc,
+        env_note=options.docker_env_note,
+    )
+
+
+def _upstream_authorization(options: WrapperOptions) -> str | None:
+    """Read the upstream credential on the host; it never enters the sandbox."""
+
+    name = options.docker_upstream_auth_env
+    if not name:
+        return None
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Environment variable {name!r} is empty or missing.")
+    lowered = value.lower()
+    if lowered.startswith("bearer ") or lowered.startswith("basic "):
+        return value
+    return f"Bearer {value}"
+
+
+def _launch_in_docker(
+    options: WrapperOptions,
+    settings: ModelSettings,
+    *,
+    upstream_url: str,
+    authorization: str | None,
+) -> int:
+    spec = SandboxSpec(
+        settings=settings,
+        upstream_url=upstream_url,
+        upstream_authorization=authorization,
+        codex_arguments=list(options.codex_arguments),
+    )
+    return run_sandbox(spec, _sandbox_options(options))
+
+
 def _require_action_only(options: WrapperOptions) -> None:
     if options.codex_arguments:
         raise ValueError(
             f"The codex-modal {options.action!r} action cannot be combined with Codex arguments."
         )
+
+
+def _run_docker_upstream(options: WrapperOptions, resolved) -> int:
+    """Container mode against an arbitrary OpenAI-compatible upstream, no Modal."""
+
+    upstream = options.docker_upstream or ""
+    authorization = _upstream_authorization(options)
+    settings = ModelSettings(
+        slug=options.docker_model_slug or resolved.display_model,
+        display_model=resolved.display_model,
+        context_window=resolved.context_window,
+        reasoning_effort=resolved.reasoning_effort,
+        reasoning_levels=resolved.reasoning_levels,
+        provider_base_url=upstream,
+        persist_history=options.persist_history,
+    )
+    if options.dry_run:
+        print("Dry run passed (Docker sandbox, no Modal resources).")
+        print(f"  Model:            {settings.display_model}")
+        print(f"  Model slug:       {settings.slug}")
+        print(f"  Broker upstream:  {upstream}")
+        print(
+            "  Credential:       "
+            + (
+                f"host env {options.docker_upstream_auth_env} -> broker only"
+                if authorization
+                else "none"
+            )
+        )
+        print(f"  Egress ports:     {options.docker_allow_ports or [80, 443]}")
+        print(f"  Firewall:         {options.docker_firewall}")
+        print(f"  Log export root:  {STATE_ROOT / 'docker-runs'}")
+        return 0
+    return _launch_in_docker(
+        options, settings, upstream_url=upstream, authorization=authorization
+    )
 
 
 def _run(options: WrapperOptions) -> int:
@@ -280,6 +405,8 @@ def _run(options: WrapperOptions) -> int:
         raise ValueError("--modal-force-token is only valid with `codex-modal setup`.")
 
     workspace = caller_cwd()
+    if options.docker and options.docker_upstream:
+        return _run_docker_upstream(options, resolved)
     endpoint_name, endpoint_host, shared_base_url = endpoint_target(
         options, resolved.display_model
     )
@@ -365,11 +492,24 @@ def _run(options: WrapperOptions) -> int:
                 "  Model isolation:  one-model catalog; main/review pinned; agents, memories, "
                 "Guardian, apps, search, and remote compaction disabled"
             )
+            if options.docker:
+                print(
+                    "  Execution:        local Docker sandbox; Codex bypasses approvals "
+                    "inside the container"
+                )
+                print(f"  Broker upstream:  {initial_base_url} (token attached by broker)")
+                print(f"  Egress ports:     {options.docker_allow_ports or [80, 443]}")
+                print(f"  Firewall:         {options.docker_firewall}")
+                print(f"  Log export root:  {STATE_ROOT / 'docker-runs'}")
         finally:
             configuration.clean_up()
         return 0
 
     if not needs_inference:
+        if options.docker:
+            return _launch_in_docker(
+                options, settings, upstream_url=initial_base_url, authorization=None
+            )
         configuration = prepare_run_configuration(
             settings, workspace=workspace, proxy_token=None, validate_strict=False
         )
@@ -554,6 +694,19 @@ def _run(options: WrapperOptions) -> int:
             provider_base_url=route.base_url,
             persist_history=options.persist_history,
         )
+        if options.docker:
+            print(
+                f"Launching Codex in a local container against the {route.source} "
+                "Responses route; the Modal proxy token stays on this machine and is "
+                "attached by the egress broker."
+            )
+            return _launch_in_docker(
+                options,
+                settings,
+                upstream_url=route.base_url,
+                authorization=f"Bearer {credential.combined}",
+            )
+
         configuration = prepare_run_configuration(
             settings,
             workspace=workspace,
@@ -664,6 +817,16 @@ def _main(arguments: list[str]) -> int:
     if options.action == "setup":
         _require_action_only(options)
         _setup(options)
+        return 0
+    if options.action == "docker-prune":
+        _require_action_only(options)
+        from .docker.sandbox import prune_sandboxes
+
+        containers, networks, volumes = prune_sandboxes()
+        print(
+            f"Removed {containers} sandbox container(s), {networks} network(s), "
+            f"and {volumes} volume(s)."
+        )
         return 0
     if options.action == "cleanup":
         _require_action_only(options)

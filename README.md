@@ -115,6 +115,29 @@ logging, web search, plugins/apps, memories, and remote compaction; and rejects 
 arguments that could override the provider. Project instructions and ordinary Codex
 commands still work.
 
+## Local Docker sandbox
+
+`--docker` runs Codex in a throwaway local container with approvals and Codex's
+own sandbox bypassed: the agent is unrestricted inside the box, and the box is the
+boundary. The image is a general dev/cyber box (compilers, Python/Node/Go/Rust,
+network tools, and a headless Chromium the agent can drive). It has internet but
+no view of the host — it sits alone on a Docker `--internal` network whose only
+peer is an egress broker allowing public addresses on ports 80/443 only (host,
+LAN, loopback, link-local, metadata, CGNAT refused; second-layer in-container
+iptables default-deny). No host path is mounted (per-run volumes, read-only
+rootfs, caps dropped, non-root, no Docker socket), and the broker attaches the
+Modal token per request so the agent can use the model but never read it.
+
+```sh
+./codex-modal.sh --docker                    # Modal model, Codex in a container
+./codex-modal.sh --docker --docker-shell     # a shell in the same sandbox
+./codex-modal.sh --docker-prune              # remove leftovers after a crash
+```
+
+Each run exports raw logs (session rollout, `agent-console.log`, `egress.jsonl`)
+to `.codex-modal/docker-runs/<id>/`. Run `--modal-help` for the full option list;
+`--docker-upstream` targets any OpenAI-compatible server with no Modal at all.
+
 ## Development
 
 The test suite and dry run do not create paid Modal resources:

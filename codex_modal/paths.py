@@ -6,7 +6,18 @@ import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STATE_ROOT = PROJECT_ROOT / ".codex-modal"
+
+
+def _state_root() -> Path:
+    """Allow the Docker sandbox to place wrapper state on a writable volume."""
+
+    override = os.environ.get("CODEX_MODAL_STATE_ROOT")
+    if override:
+        return Path(override).expanduser()
+    return PROJECT_ROOT / ".codex-modal"
+
+
+STATE_ROOT = _state_root()
 CODEX_HOME = STATE_ROOT / "codex-home"
 RUNTIME_ROOT = STATE_ROOT / "runtime"
 PRESETS_PATH = PROJECT_ROOT / "modal-models.json"
