@@ -2,6 +2,43 @@
   "_comment": "Self-managed model deployments for `modal-deploy.sh <catalog.json> <index|name>`. Each entry is a full SGLang-on-Modal deploy spec. After deploying, point a client at the endpoint by its `endpoint_name`, e.g. blue-green-red's `--model red=modal:glm-53-flash-unc`.",
   "models": [
     {
+      "name": "deepseek-v4-flash-abliterated",
+      "description": "DeepSeek-V4-Flash-0731 abliterated (uncensored) via SGLang on H200:2; reuses the existing base volume.",
+      "source_repo": "cebeuq/DeepSeek-V4-Flash-0731-abliterated",
+      "custom_hf_revision": "21bd923c2574d9edcd7b914885024ce72fd5c076",
+      "base_model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "base_model_revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+      "base_volume": "cm-codex-deepseek-v4-flash-0731-abliterated-e9a201-458e3e607a",
+      "base_volume_path": "/model",
+      "endpoint_name": "codex-dsv4-abliterated-h200-15m",
+      "gpu": "H200:2",
+      "region": "us-west",
+      "hf_token_env": "HF_TOKEN",
+      "context_window": 262144,
+      "reasoning_effort": "high",
+      "reasoning_levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "scaledown_window": 900,
+      "startup_timeout": 7200,
+      "target_inputs": 4,
+      "keep_endpoint": true,
+      "sglang_image": "lmsysorg/sglang:v0.5.16-cu130",
+      "sglang_args": [
+        "--chunked-prefill-size=4096",
+        "--context-length=262144",
+        "--cuda-graph-max-bs-decode=16",
+        "--mem-fraction-static=0.85",
+        "--moe-runner-backend=marlin",
+        "--reasoning-parser=deepseek-v4",
+        "--swa-full-tokens-ratio=0.1",
+        "--tool-call-parser=deepseekv4",
+        "--trust-remote-code"
+      ]
+    },
+    {
       "name": "glm-5.3-flash-uncensored",
       "description": "GLM-5.3-Flash-Uncensored-FP8 (320B/18B MoE, block-FP8) via SGLang.",
       "source_repo": "orcarouter/GLM-5.3-Flash-Uncensored-FP8",

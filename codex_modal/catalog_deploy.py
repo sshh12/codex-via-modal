@@ -85,6 +85,18 @@ def _codex_modal_argv(entry: dict[str, Any], gpu: str) -> list[str]:
     ]
     if entry.get("keep_endpoint", True):
         argv.append("--modal-keep-endpoint")
+    # Optional base model + shard-reuse (fine-tunes/abliterations that share most
+    # shards with a base checkpoint already on a Modal Volume).
+    if entry.get("base_model"):
+        argv += ["--modal-model", str(entry["base_model"])]
+    if entry.get("base_model_revision"):
+        argv += ["--modal-model-revision", str(entry["base_model_revision"])]
+    if entry.get("custom_hf_revision"):
+        argv += ["--modal-custom-hf-revision", str(entry["custom_hf_revision"])]
+    if entry.get("base_volume"):
+        argv += ["--modal-base-volume", str(entry["base_volume"])]
+    if entry.get("base_volume_path"):
+        argv += ["--modal-base-volume-path", str(entry["base_volume_path"])]
     if entry.get("hf_token_env"):
         argv += ["--modal-hf-token-env", str(entry["hf_token_env"])]
     if entry.get("sglang_image"):
