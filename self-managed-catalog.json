@@ -11,11 +11,19 @@
       "hf_token_env": "HF_TOKEN",
       "context_window": 262144,
       "reasoning_effort": "high",
-      "reasoning_levels": ["low", "high", "max"],
+      "reasoning_levels": [
+        "low",
+        "high",
+        "max"
+      ],
       "scaledown_window": 900,
       "startup_timeout": 7200,
       "keep_endpoint": true,
-      "sglang_args": ["--context-length=262144", "--mem-fraction-static=0.92"]
+      "sglang_args": [
+        "--context-length=262144",
+        "--mem-fraction-static=0.92"
+      ],
+      "sglang_image": "lmsysorg/sglang:glm-5.3-flash"
     }
   ]
 }
