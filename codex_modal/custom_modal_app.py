@@ -38,10 +38,17 @@ REMOTE_CONFIG_ENV = {CUSTOM_APP_CONFIG_ENV: raw_config} | HF_RUNTIME_ENV
 
 def _hf_secrets() -> list[modal.Secret]:
     token_env = config.get("hf_token_env")
-    if not token_env or not modal.is_local():
+    if not token_env:
         return []
-    token = os.environ.get(str(token_env))
-    if not token:
+    # Declare the secret unconditionally so the function's dependency COUNT is the
+    # same at local deploy time and at remote container hydration. Modal binds a
+    # container's object ids to code dependencies positionally, so gating this on
+    # modal.is_local() (which is False inside the container) produced "Function
+    # has N dependencies but container got N+1 object ids". The token value is
+    # captured from the local env at deploy; the deployed secret supplies it in
+    # the container, so the empty fallback here is only a structural placeholder.
+    token = os.environ.get(str(token_env), "")
+    if modal.is_local() and not token:
         raise RuntimeError(f"Environment variable {token_env!r} is empty or missing.")
     return [modal.Secret.from_dict({"HF_TOKEN": token})]
 
