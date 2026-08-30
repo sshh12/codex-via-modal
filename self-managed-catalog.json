@@ -58,7 +58,9 @@
       "keep_endpoint": true,
       "sglang_args": [
         "--context-length=262144",
-        "--mem-fraction-static=0.92"
+        "--mem-fraction-static=0.92",
+        "--tool-call-parser=glm45",
+        "--reasoning-parser=glm45"
       ],
       "sglang_image": "lmsysorg/sglang:glm-5.3-flash",
       "serving_pip": [
