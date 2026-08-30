@@ -75,6 +75,21 @@ fine-tunes can reuse unchanged shards from an existing Modal Volume with
 surface. SGLang architecture support, parsers, quantization, tensor parallelism, and
 GPU memory must still match the checkpoint.
 
+### Catalog deploys
+
+Repeatable self-managed deploys live in `self-managed-catalog.json` (a `models`
+array of full deploy specs). Bring one up by index or name; the served endpoint
+URL is printed and the app is left warm (subject to scale-to-zero):
+
+```sh
+./modal-deploy.sh self-managed-catalog.json glm-5.3-flash-uncensored
+./modal-deploy.sh self-managed-catalog.json 0 --gpu H200:4 --dry-run
+```
+
+Adding a model is one catalog entry, not new code. Afterwards, attach by the
+entry's `endpoint_name` with `--modal-use-app <name>`, or from another client such
+as blue-green-red via `--model <role>=modal:<endpoint_name>`.
+
 ## Lifecycle and cost controls
 
 Self-managed apps default to zero warm containers, at most one serving container, and
