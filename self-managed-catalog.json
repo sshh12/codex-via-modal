@@ -13,6 +13,7 @@
       "reasoning_effort": "high",
       "reasoning_levels": ["low", "high", "max"],
       "scaledown_window": 900,
+      "startup_timeout": 7200,
       "keep_endpoint": true,
       "sglang_args": ["--context-length=262144", "--mem-fraction-static=0.92"]
     }

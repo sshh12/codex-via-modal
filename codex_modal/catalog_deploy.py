@@ -90,7 +90,8 @@ def _codex_modal_argv(entry: dict[str, Any], gpu: str) -> list[str]:
     if entry.get("sglang_image"):
         argv += ["--modal-sglang-image", str(entry["sglang_image"])]
     for optional, flag in (("cpu", "--modal-cpu"), ("memory", "--modal-memory"),
-                           ("target_inputs", "--modal-target-inputs")):
+                           ("target_inputs", "--modal-target-inputs"),
+                           ("startup_timeout", "--modal-startup-timeout")):
         if entry.get(optional) is not None:
             argv += [flag, str(entry[optional])]
     for sglang_arg in entry.get("sglang_args", []):
