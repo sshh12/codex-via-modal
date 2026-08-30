@@ -78,6 +78,12 @@ serving_image = (
     )
     .env(REMOTE_CONFIG_ENV)
 )
+# Extra wheels layered onto the serving image, installed last so an explicit
+# pin wins over whatever the base image or autoinference-utils resolved - e.g.
+# a Transformers version new enough to recognize a very new model architecture.
+_serving_pip = tuple(str(package) for package in (config.get("serving_pip") or ()))
+if _serving_pip:
+    serving_image = serving_image.uv_pip_install(*_serving_pip)
 
 
 def _safe_relative_path(filename: str) -> PurePosixPath:

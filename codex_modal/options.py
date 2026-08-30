@@ -34,6 +34,7 @@ class WrapperOptions:
     gpu: str | None = None
     sglang_image: str | None = None
     sglang_args: list[str] = field(default_factory=list)
+    serving_pip: list[str] = field(default_factory=list)
     cpu: int | None = None
     memory: int | None = None
     scaledown_window: int | None = None
@@ -134,6 +135,7 @@ VALUE_OPTIONS = {
 REPEATED_OPTIONS = {
     "--modal-compute-region": "compute_regions",
     "--modal-sglang-arg": "sglang_args",
+    "--modal-serving-pip": "serving_pip",
     "--docker-allow-port": "docker_allow_ports",
     "--docker-allow-host": "docker_allow_hosts",
 }
@@ -367,6 +369,7 @@ def validate_wrapper_options(options: WrapperOptions) -> None:
         "--modal-gpu": options.gpu,
         "--modal-sglang-image": options.sglang_image,
         "--modal-sglang-arg": options.sglang_args,
+        "--modal-serving-pip": options.serving_pip,
         "--modal-cpu": options.cpu,
         "--modal-memory": options.memory,
         "--modal-scaledown-window": options.scaledown_window,

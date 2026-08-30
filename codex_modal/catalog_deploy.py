@@ -24,6 +24,8 @@ Each entry:
     scaledown_window  idle seconds before scale-to-zero  (default 900)
     keep_endpoint     leave the endpoint up after deploy  (default true)
     sglang_args       list of extra "--flag=value" SGLang args
+    serving_pip       list of extra pip packages for the serving image
+                      (e.g. ["transformers==5.16.0"] for a new architecture)
     cpu, memory, target_inputs, sglang_image   optional overrides
 """
 
@@ -108,6 +110,8 @@ def _codex_modal_argv(entry: dict[str, Any], gpu: str) -> list[str]:
             argv += [flag, str(entry[optional])]
     for sglang_arg in entry.get("sglang_args", []):
         argv += ["--modal-sglang-arg", str(sglang_arg)]
+    for package in entry.get("serving_pip", []):
+        argv += ["--modal-serving-pip", str(package)]
     argv += ["--", "exec", "--skip-git-repo-check", "Reply with exactly OK."]
     return argv
 

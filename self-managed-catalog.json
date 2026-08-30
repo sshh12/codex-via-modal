@@ -60,7 +60,10 @@
         "--context-length=262144",
         "--mem-fraction-static=0.92"
       ],
-      "sglang_image": "lmsysorg/sglang:glm-5.3-flash"
+      "sglang_image": "lmsysorg/sglang:glm-5.3-flash",
+      "serving_pip": [
+        "transformers==5.16.0"
+      ]
     }
   ]
 }

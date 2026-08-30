@@ -53,6 +53,7 @@ class CustomDeployment:
     sglang_image: str
     autoinference_utils_version: str
     server_args: dict[str, str]
+    serving_pip: tuple[str, ...]
     cpu: int
     memory: int
     scaledown_window: int
@@ -220,6 +221,7 @@ def build_custom_deployment(
         sglang_image=image,
         autoinference_utils_version=DEFAULT_AUTOINFERENCE_UTILS,
         server_args=parse_sglang_args(options.sglang_args),
+        serving_pip=tuple(options.serving_pip),
         cpu=options.cpu or DEFAULT_CPU,
         memory=options.memory or DEFAULT_MEMORY,
         scaledown_window=(
