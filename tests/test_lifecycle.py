@@ -31,7 +31,10 @@ class LifecycleTests(unittest.TestCase):
                 return {"paths": {"/v1/responses": {}}}
             raise AssertionError(url)
 
-        with patch.object(lifecycle, "_authenticated_json", side_effect=document):
+        with (
+            patch.object(lifecycle, "_authenticated_json", side_effect=document),
+            patch.object(lifecycle, "_responses_route_works", return_value=True),
+        ):
             route = lifecycle._wait_for_available_route(
                 endpoint_host="endpoint.us-west.modal.direct",
                 shared_base_url=shared,
@@ -45,6 +48,37 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(route.model_slug, "org/model")
         self.assertEqual(route.base_url, direct)
         self.assertEqual(route.source, "direct")
+
+    def test_advertised_responses_route_that_does_not_answer_is_rejected(self) -> None:
+        """SGLang registers /v1/responses even when its handler failed to start."""
+
+        shared = "https://inference.us-west.modal.direct/v1"
+        direct = "https://workspace--ep-model-server.us-west.modal.direct/v1"
+
+        def document(url: str, _token: str) -> dict:
+            if url == f"{shared}/models":
+                return {"data": []}
+            if url == f"{direct}/models":
+                return {"data": [{"id": "org/model"}]}
+            if url == direct.removesuffix("/v1") + "/openapi.json":
+                return {"paths": {"/v1/responses": {}}}
+            raise AssertionError(url)
+
+        with (
+            patch.object(lifecycle, "_authenticated_json", side_effect=document),
+            patch.object(lifecycle, "_responses_route_works", return_value=False),
+            patch.object(lifecycle.time, "sleep", lambda _seconds: None),
+        ):
+            with self.assertRaises(RuntimeError):
+                lifecycle._wait_for_available_route(
+                    endpoint_host="endpoint.us-west.modal.direct",
+                    shared_base_url=shared,
+                    direct_base_url=direct,
+                    preferred_model="org/model",
+                    proxy_token="wk-test.ws-test",
+                    deadline=time.monotonic() + 0.5,
+                    state_path=None,
+                )
 
     def test_live_status_advances_to_route_readiness(self) -> None:
         endpoint_id = "ep-" + "A" * 22

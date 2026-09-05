@@ -102,6 +102,18 @@ class ModelSettings:
     reasoning_levels: tuple[str, ...]
     provider_base_url: str
     persist_history: bool
+    #: Advertise the apply_patch tool. SGLang silently drops `type: "custom"`
+    #: tools, so a self-managed endpoint never sees it and the model is told to
+    #: use a tool that does not exist. Turn it off there and edit with the shell.
+    apply_patch: bool = True
+    #: Let the agent delegate to a recursive `codex exec`. Off by default: a
+    #: subagent opens a second, unattributed conversation on the same endpoint.
+    subagents: bool = False
+    #: Sampling, carried for whoever actually applies it. Codex has no config
+    #: key for these, so nothing is written into config.toml; they travel in the
+    #: run spec for a front end (an RL shim, a gateway) to enforce server-side.
+    temperature: float | None = None
+    top_p: float | None = None
 
 
 @dataclass
@@ -249,9 +261,18 @@ def _model_entry(template: dict[str, Any], settings: ModelSettings) -> dict[str,
         instructions = re.sub(r"\AYou are Codex,[^\r\n]*", identity, instructions)
     else:
         instructions = identity
-    instructions += (
-        "\n\nUse the standard tools supplied by Codex. Use the apply_patch tool for file edits."
-    )
+    if settings.apply_patch:
+        instructions += (
+            "\n\nUse the standard tools supplied by Codex. "
+            "Use the apply_patch tool for file edits."
+        )
+    else:
+        # SGLang drops `type: "custom"` tools without complaining, so on a
+        # self-managed endpoint apply_patch is advertised and never delivered.
+        instructions += (
+            "\n\nUse the standard tools supplied by Codex. There is no patch tool "
+            "here: edit files with shell commands (a heredoc, `sed -i`, or a script)."
+        )
 
     template.update(
         {
@@ -283,6 +304,8 @@ def _model_entry(template: dict[str, Any], settings: ModelSettings) -> dict[str,
             "additional_speed_tiers": [],
         }
     )
+    if not settings.apply_patch:
+        template.pop("apply_patch_tool_type", None)
     for property_name in (
         "availability_nux",
         "upgrade",
@@ -322,7 +345,7 @@ generate_memories = false
 use_memories = false
 
 [agents]
-enabled = false
+enabled = {"true" if settings.subagents else "false"}
 default_subagent_model = {toml_string(settings.slug)}
 
 [model_providers.modal]
@@ -355,7 +378,6 @@ def guard_overrides(
         "feedback.enabled",
         "memories.generate_memories",
         "memories.use_memories",
-        "agents.enabled",
         "features.apps",
         "features.browser_use",
         "features.browser_use_external",
@@ -391,6 +413,7 @@ def guard_overrides(
         ("approvals_reviewer", '"user"'),
         ("apps._default.approvals_reviewer", '"user"'),
         ("history.persistence", toml_string(history)),
+        ("agents.enabled", "true" if settings.subagents else "false"),
         ("agents.default_subagent_model", toml_string(settings.slug)),
         ("otel.exporter", '"none"'),
         ("otel.metrics_exporter", '"none"'),

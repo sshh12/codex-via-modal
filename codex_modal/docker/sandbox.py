@@ -80,6 +80,10 @@ class SandboxOptions:
     env_doc: bool = True
     env_note: str | None = None
     environment: dict[str, str] = field(default_factory=dict)
+    # Which backend will run this sandbox. Recorded in the run spec so the
+    # in-container environment document describes the isolation that is actually
+    # in force rather than the local-Docker one.
+    backend: str = "local"
 
 
 @dataclass
@@ -267,6 +271,10 @@ def _write_run_spec(directory: Path, spec: SandboxSpec, options: SandboxOptions,
         "reasoning_levels": list(settings.reasoning_levels),
         "provider_base_url": f"http://{proxy_ip}:{MODEL_PORT}/v1",
         "persist_history": settings.persist_history,
+        "apply_patch": settings.apply_patch,
+        "subagents": settings.subagents,
+        "temperature": settings.temperature,
+        "top_p": settings.top_p,
         "workspace": "/work",
         "codex_arguments": list(spec.codex_arguments),
         "danger": options.danger,
@@ -277,6 +285,7 @@ def _write_run_spec(directory: Path, spec: SandboxSpec, options: SandboxOptions,
         "allow_hosts": list(options.allow_hosts),
         "rust_log": options.rust_log,
         "environment": dict(options.environment),
+        "backend": getattr(options, "backend", "local"),
         "validate_strict": True,
     }
     path = directory / "run.json"

@@ -55,6 +55,12 @@ def _settings(spec: dict[str, object]) -> ModelSettings:
         reasoning_levels=tuple(str(level) for level in spec["reasoning_levels"]),
         provider_base_url=str(spec["provider_base_url"]),
         persist_history=bool(spec.get("persist_history", True)),
+        apply_patch=bool(spec.get("apply_patch", True)),
+        subagents=bool(spec.get("subagents", False)),
+        temperature=(
+            float(spec["temperature"]) if spec.get("temperature") is not None else None
+        ),
+        top_p=(float(spec["top_p"]) if spec.get("top_p") is not None else None),
     )
 
 
@@ -72,6 +78,21 @@ def _environment_doc(spec: dict[str, object]) -> str:
     )
     note = str(spec.get("env_note") or "").strip()
     note_block = f"\nTask notes: {note}\n" if note else ""
+    # Saying 'no direct egress, the host is unreachable' is true under local
+    # Docker and false on a Modal Sandbox, where the broker is on loopback and
+    # gVisor - not an internal network - is the boundary. An environment doc
+    # that differs from the environment makes backend equivalence untestable.
+    if str(spec.get("backend") or "local") == "modal":
+        boundary = (
+            "  Raw sockets, ptrace and packet capture are unavailable here (no "
+            "NET_RAW/NET_ADMIN/SYS_PTRACE), so `ping`, `nmap -sS` and `tcpdump` will "
+            "not work; use TCP connect scans and application-level tools."
+        )
+    else:
+        boundary = (
+            "  Raw sockets, ptrace and packet capture are available (NET_RAW, "
+            "NET_ADMIN, SYS_PTRACE) inside this container."
+        )
     return f"""{ENV_DOC_BEGIN}
 # Runtime environment
 
@@ -84,6 +105,7 @@ and is discarded on exit, so you cannot see or reach the host; work freely in
 - Network: internet only via the preset HTTP/HTTPS proxy, port(s) {ports}, {host_line};
   no direct egress and no external DNS (the proxy resolves names). apt/pip/npm/
   curl/git are already proxy-configured. The host and LAN are unreachable.
+{boundary}
 - Installed: Python (pip/uv), Node (npm/pnpm), Go, Rust, JDK, gcc/clang/make/
   cmake/gdb; git, ripgrep, jq, sqlite3, ffmpeg; nmap, tcpdump, netcat, socat,
   dig, whois; headless Chromium at `/usr/bin/chromium`. Install anything else

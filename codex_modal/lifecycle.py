@@ -549,6 +549,45 @@ def _authenticated_json(url: str, proxy_token: str) -> dict[str, Any]:
     return document
 
 
+def _responses_route_works(base_url: str, model: str, proxy_token: str) -> bool:
+    """Send one real request instead of trusting the advertised route.
+
+    SGLang registers /v1/responses unconditionally, including when the handler
+    behind it failed to initialise, so an openapi.json listing proves only that
+    a path exists. A one-token POST is the cheapest thing that proves the route
+    actually answers.
+    """
+
+    payload = json.dumps(
+        {
+            "model": model,
+            "input": "ping",
+            "max_output_tokens": 16,
+            "stream": False,
+            "store": False,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        base_url.rstrip("/") + "/responses",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {proxy_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            document = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        # 4xx means the route is live and merely disliked our probe body, which
+        # is all we are asking. A 5xx is the uninitialised-handler case.
+        return 400 <= error.code < 500
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(document, dict) and bool(document.get("id") or document.get("output"))
+
+
 def _document_model_ids(document: dict[str, Any]) -> set[str]:
     rows = document.get("data", [])
     return {
@@ -634,6 +673,13 @@ def _wait_for_available_route(
                 pass
 
         if direct_model is not None and direct_supports_responses:
+            if not _responses_route_works(direct_base_url, direct_model, proxy_token):
+                print(
+                    "Direct endpoint advertises /v1/responses but the route did not "
+                    "answer; waiting for the server to finish starting."
+                )
+                time.sleep(5)
+                continue
             if direct_model != preferred_model:
                 print(
                     f"Direct endpoint advertises {direct_model}; using that model ID "
