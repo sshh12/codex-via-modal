@@ -66,6 +66,34 @@
       "serving_pip": [
         "transformers==5.16.0"
       ]
+    },
+    {
+      "name": "glm-5.3-abliterated-nvfp4",
+      "description": "GLM-5.3 abliterated, NVFP4 (ModelOpt experts-only W4A4, ~433 GiB) via SGLang on B300:2. NVFP4 needs Blackwell; B300 (288 GiB/GPU) is the cheapest fit since TP must be a power of 2 and B200 (180 GiB) would need 4. No transformers pin: the v0.5.19 image ships 5.12.1, which already has glm_moe_dsa - forcing 5.16.0 makes SGLang's qwen3_asr config registration collide with the now-native one and the server exits 1 before the health check.",
+      "source_repo": "dealignai/GLM-5.3-ABLITERATED-NVFP4",
+      "custom_hf_revision": "1b96da2dc461c7148d87181fa3a0cffcde3a1862",
+      "endpoint_name": "glm-53-abliterated-nvfp4",
+      "gpu": "B300:2",
+      "region": "us-west",
+      "context_window": 262144,
+      "reasoning_effort": "high",
+      "reasoning_levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "scaledown_window": 900,
+      "startup_timeout": 7200,
+      "keep_endpoint": true,
+      "sglang_image": "lmsysorg/sglang:v0.5.19-cu130",
+      "sglang_args": [
+        "--quantization=modelopt_fp4",
+        "--context-length=262144",
+        "--chunked-prefill-size=8192",
+        "--mem-fraction-static=0.9",
+        "--tool-call-parser=glm47",
+        "--reasoning-parser=glm45"
+      ]
     }
   ]
 }
