@@ -40,10 +40,10 @@
     },
     {
       "name": "glm-5.3-flash-uncensored",
-      "description": "GLM-5.3-Flash-Uncensored-FP8 (320B/18B MoE, block-FP8) via SGLang.",
+      "description": "GLM-5.3-Flash-Uncensored-FP8 (320B/18B MoE, block-FP8, ~306 GiB) via SGLang on B300:2 ($14.20/hr vs $31.60/hr for H100:8; H100:4 does not fit at 76.4 GiB/GPU of 80). mem-fraction-static is 0.78, NOT the 0.92 that suited H100:8: a B300 is 267.69 GiB usable and weights take 152.9 GiB of it at tp2, so 0.92 sized a ~93 GiB KV pool and left only 21 GiB - less than the 46 GiB deep_gemm wants for warmup - and cuda-graph capture OOM'd with exit -9. No transformers pin: 5.16.0 lacks glm5_next (5.16.1 adds it) and 5.13+ ships a native qwen3_asr that collides with SGLang's own registration; the glm-5.3-flash image is self-sufficient.",
       "source_repo": "orcarouter/GLM-5.3-Flash-Uncensored-FP8",
       "endpoint_name": "glm-53-flash-unc",
-      "gpu": "H100:8",
+      "gpu": "B300:2",
       "region": "us-west",
       "hf_token_env": "HF_TOKEN",
       "context_window": 262144,
@@ -58,14 +58,15 @@
       "keep_endpoint": true,
       "sglang_args": [
         "--context-length=262144",
-        "--mem-fraction-static=0.92",
+        "--cuda-graph-max-bs-decode=32",
+        "--ep-size=2",
+        "--kv-cache-dtype=fp8_e4m3",
+        "--mem-fraction-static=0.78",
+        "--moe-runner-backend=deep_gemm",
         "--tool-call-parser=glm47",
         "--reasoning-parser=glm45"
       ],
-      "sglang_image": "lmsysorg/sglang:glm-5.3-flash",
-      "serving_pip": [
-        "transformers==5.16.0"
-      ]
+      "sglang_image": "lmsysorg/sglang:glm-5.3-flash"
     },
     {
       "name": "glm-5.3-abliterated-nvfp4",
